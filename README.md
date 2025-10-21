@@ -1,4 +1,4 @@
-# bluetooth_test_main
+# bluetooth_test
 
 A new Flutter project.
 
