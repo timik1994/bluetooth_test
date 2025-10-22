@@ -246,6 +246,72 @@ class DeviceItemWidget extends StatelessWidget {
       );
     }
 
+    // Если устройство не подключаемое, показываем неактивную кнопку
+    if (device.isConnectable != true) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: Colors.grey.shade300,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.bluetooth_disabled,
+              color: Colors.grey.shade500,
+              size: 16,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Недоступно',
+              style: TextStyle(
+                color: Colors.grey.shade500,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Если нет обработчика подключения, показываем неактивную кнопку
+    if (onConnect == null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: Colors.grey.shade300,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.bluetooth_disabled,
+              color: Colors.grey.shade500,
+              size: 16,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Отключено',
+              style: TextStyle(
+                color: Colors.grey.shade500,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return GestureDetector(
       onTap: () {
         onConnect?.call();

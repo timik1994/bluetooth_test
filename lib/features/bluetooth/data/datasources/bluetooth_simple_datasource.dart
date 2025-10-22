@@ -4,6 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../domain/entities/bluetooth_device_entity.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
 import '../models/bluetooth_device_model.dart';
+import '../services/app_logger.dart';
 
 abstract class BluetoothSimpleDataSource {
   Stream<List<BluetoothDeviceEntity>> get discoveredDevices;
@@ -34,9 +35,18 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
   final List<BluetoothLogEntity> _logs = [];
   final Map<String, BluetoothDeviceEntity> _discoveredDevices = {};
   final Map<String, BluetoothDevice> _connectedDevices = {};
+  final AppLogger _appLogger = AppLogger();
   
   StreamSubscription? _scanResultsSubscription;
   bool _isInitialized = false;
+
+  BluetoothSimpleDataSourceImpl() {
+    _initializeAppLogger();
+  }
+
+  void _initializeAppLogger() async {
+    await _appLogger.initialize();
+  }
 
   void _initializeBluetooth() {
     if (_isInitialized) return;
@@ -157,6 +167,7 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
                 deviceType: device.deviceType,
                 isClassicBluetooth: false,
                 isBonded: isBonded,
+                isConnectable: device.isConnectable,
               );
               
               _discoveredDevices[deviceId] = deviceWithBondInfo;
@@ -177,6 +188,7 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
                   deviceType: existingDevice.deviceType,
                   isClassicBluetooth: existingDevice.isClassicBluetooth,
                   isBonded: existingDevice.isBonded,
+                  isConnectable: existingDevice.isConnectable,
                 );
                 _updateDeviceList();
               }
@@ -206,6 +218,7 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
           deviceType: 'Подключенное устройство',
           isClassicBluetooth: false,
           isBonded: true, // Подключенные устройства считаем сопряженными
+          isConnectable: true, // Подключенные устройства всегда подключаемы
         );
         
         _discoveredDevices[deviceId] = deviceModel;
@@ -311,6 +324,7 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
             deviceType: existingDevice.deviceType,
             isClassicBluetooth: existingDevice.isClassicBluetooth,
             isBonded: true,
+            isConnectable: existingDevice.isConnectable,
           );
           _updateDeviceList();
         }
@@ -333,6 +347,7 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
                 deviceType: existingDevice.deviceType,
                 isClassicBluetooth: existingDevice.isClassicBluetooth,
                 isBonded: existingDevice.isBonded,
+                isConnectable: existingDevice.isConnectable,
               );
               _updateDeviceList();
             }
@@ -369,28 +384,82 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
       final services = await device.discoverServices();
       _addLog(LogLevel.info, '🔍 Найдено ${services.length} сервисов на "$deviceName"');
 
+      // Логируем информацию о сервисах через AppLogger
+      final servicesInfo = services.map((service) => {
+        'uuid': service.uuid.toString(),
+        'characteristics': service.characteristics.map((char) => {
+          'uuid': char.uuid.toString(),
+          'properties': char.properties.toString(),
+        }).toList(),
+      }).toList();
+
+      await _appLogger.logDeviceServices(
+        deviceName,
+        device.remoteId.toString(),
+        servicesInfo,
+      );
+
       for (var service in services) {
         for (var characteristic in service.characteristics) {
           try {
             if (characteristic.properties.read) {
               final value = await characteristic.read();
               _addLog(LogLevel.info, '📊 Данные от "$deviceName": ${value.length} байт');
+              
+              // Логируем данные через AppLogger
+              final hexData = value.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+              await _appLogger.logDataReceived(
+                deviceName,
+                device.remoteId.toString(),
+                {
+                  'characteristicUuid': characteristic.uuid.toString(),
+                  'serviceUuid': service.uuid.toString(),
+                  'hexData': hexData,
+                  'dataSize': value.length,
+                  'rawData': value,
+                  'data': String.fromCharCodes(value.where((b) => b >= 32 && b <= 126)),
+                },
+              );
             }
 
             if (characteristic.properties.notify) {
               await characteristic.setNotifyValue(true);
-              characteristic.lastValueStream.listen((value) {
+              characteristic.lastValueStream.listen((value) async {
                 _addLog(LogLevel.info, '📨 Уведомление от "$deviceName": ${value.length} байт');
+                
+                // Логируем уведомления через AppLogger
+                final hexData = value.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+                await _appLogger.logDataReceived(
+                  deviceName,
+                  device.remoteId.toString(),
+                  {
+                    'characteristicUuid': characteristic.uuid.toString(),
+                    'serviceUuid': service.uuid.toString(),
+                    'hexData': hexData,
+                    'dataSize': value.length,
+                    'rawData': value,
+                    'data': String.fromCharCodes(value.where((b) => b >= 32 && b <= 126)),
+                    'type': 'notification',
+                  },
+                );
               });
               _addLog(LogLevel.info, '🔔 Подписались на уведомления от "$deviceName"');
             }
           } catch (e) {
             // Игнорируем ошибки чтения отдельных характеристик
+            await _appLogger.logError('Ошибка чтения характеристики ${characteristic.uuid}: $e', 
+                context: 'DataCollection', 
+                deviceId: device.remoteId.toString(), 
+                deviceName: deviceName);
           }
         }
       }
     } catch (e) {
       _addLog(LogLevel.error, '❌ Ошибка сбора данных с "$deviceName": $e');
+      await _appLogger.logError('Ошибка сбора данных: $e', 
+          context: 'DataCollection', 
+          deviceId: device.remoteId.toString(), 
+          deviceName: deviceName);
     }
   }
 

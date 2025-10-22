@@ -13,6 +13,7 @@ class BluetoothState extends Equatable {
   final Set<String> connectingDevices; // ID устройств, которые подключаются
   final Set<String> connectedDevices; // ID текущих подключенных устройств
   final Set<String> previouslyConnectedDevices; // ID ранее подключенных устройств
+  final bool showAllDevices; // Показывать все устройства или только подключаемые
 
   const BluetoothState({
     this.isLoading = false,
@@ -25,6 +26,7 @@ class BluetoothState extends Equatable {
     this.connectingDevices = const {},
     this.connectedDevices = const {},
     this.previouslyConnectedDevices = const {},
+    this.showAllDevices = false,
   });
 
   BluetoothState copyWith({
@@ -38,6 +40,7 @@ class BluetoothState extends Equatable {
     Set<String>? connectingDevices,
     Set<String>? connectedDevices,
     Set<String>? previouslyConnectedDevices,
+    bool? showAllDevices,
   }) {
     return BluetoothState(
       isLoading: isLoading ?? this.isLoading,
@@ -50,6 +53,7 @@ class BluetoothState extends Equatable {
       connectingDevices: connectingDevices ?? this.connectingDevices,
       connectedDevices: connectedDevices ?? this.connectedDevices,
       previouslyConnectedDevices: previouslyConnectedDevices ?? this.previouslyConnectedDevices,
+      showAllDevices: showAllDevices ?? this.showAllDevices,
     );
   }
 
@@ -65,5 +69,6 @@ class BluetoothState extends Equatable {
         connectingDevices,
         connectedDevices,
         previouslyConnectedDevices,
+        showAllDevices,
       ];
 }

@@ -1,4 +1,5 @@
 import 'package:equatable/equatable.dart';
+import '../../domain/entities/bluetooth_log_entity.dart';
 
 abstract class BluetoothEvent extends Equatable {
   const BluetoothEvent();
@@ -48,4 +49,17 @@ class ClearLogsEvent extends BluetoothEvent {
 
 class LoadLogsEvent extends BluetoothEvent {
   const LoadLogsEvent();
+}
+
+class ToggleShowAllDevicesEvent extends BluetoothEvent {
+  const ToggleShowAllDevicesEvent();
+}
+
+class AddLogEvent extends BluetoothEvent {
+  final BluetoothLogEntity logEntity;
+  
+  const AddLogEvent(this.logEntity);
+  
+  @override
+  List<Object> get props => [logEntity];
 }

@@ -9,6 +9,7 @@ class BluetoothDeviceEntity extends Equatable {
   final String deviceType;
   final bool isClassicBluetooth;
   final bool isBonded;
+  final bool isConnectable;
 
   const BluetoothDeviceEntity({
     required this.id,
@@ -19,8 +20,9 @@ class BluetoothDeviceEntity extends Equatable {
     required this.deviceType,
     this.isClassicBluetooth = false,
     this.isBonded = false,
+    this.isConnectable = true,
   });
 
   @override
-  List<Object> get props => [id, name, isConnected, rssi, serviceUuids, deviceType, isClassicBluetooth, isBonded];
+  List<Object> get props => [id, name, isConnected, rssi, serviceUuids, deviceType, isClassicBluetooth, isBonded, isConnectable];
 }

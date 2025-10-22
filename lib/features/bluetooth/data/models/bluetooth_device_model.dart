@@ -12,18 +12,21 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
     required super.deviceType,
     required super.isClassicBluetooth,
     required super.isBonded,
+    required super.isConnectable,
   });
 
   factory BluetoothDeviceModel.fromBluetoothDevice(BluetoothDevice device) {
+    final deviceName = device.platformName.isNotEmpty ? device.platformName : 'Неизвестное устройство';
     return BluetoothDeviceModel(
       id: device.remoteId.toString(),
-      name: device.platformName.isNotEmpty ? device.platformName : 'Неизвестное устройство',
+      name: deviceName,
       isConnected: device.isConnected,
       rssi: 0, // RSSI будет получен из ScanResult
       serviceUuids: [], // Сервисы будут получены при подключении
       deviceType: _getDeviceType(device.platformName),
       isClassicBluetooth: false,
       isBonded: false,
+      isConnectable: _isDeviceConnectable(deviceName),
     );
   }
 
@@ -35,6 +38,9 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
       // Определяем тип устройства на основе имени И сервисов
       String deviceType = _getDeviceTypeAdvanced(deviceName, result.advertisementData.serviceUuids);
       
+      // Определяем возможность подключения на основе имени устройства
+      bool isConnectable = _isDeviceConnectable(deviceName);
+      
       return BluetoothDeviceModel(
         id: result.device.remoteId.toString(),
         name: deviceName,
@@ -44,6 +50,7 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
         deviceType: deviceType,
         isClassicBluetooth: false,
         isBonded: false,
+        isConnectable: isConnectable,
       );
     } catch (e) {
       // Возвращаем базовую модель в случае ошибки
@@ -56,6 +63,7 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
         deviceType: 'Неизвестное устройство',
         isClassicBluetooth: false,
         isBonded: false,
+        isConnectable: false,
       );
     }
   }
@@ -426,5 +434,37 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
     
     final shortId = deviceId.length > 6 ? deviceId.substring(deviceId.length - 6) : deviceId;
     return 'Устройство $shortId';
+  }
+
+  /// Определяет возможность подключения к устройству
+  /// Основано на том, что устройства с реальными именами (не сгенерированными из MAC) обычно доступны для подключения
+  static bool _isDeviceConnectable(String deviceName) {
+    // Если это MAC-адрес или сгенерированное имя - считаем не подключаемым
+    if (deviceName.startsWith('Устройство ') && deviceName.contains(':')) {
+      return false;
+    }
+    
+    // Если это только MAC-адрес - не подключаемое
+    if (RegExp(r'^[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}$').hasMatch(deviceName)) {
+      return false;
+    }
+    
+    // Если имя содержит только заглавные буквы и двоеточия (похоже на MAC) - не подключаемое
+    if (RegExp(r'^[A-F0-9:]+$').hasMatch(deviceName) && deviceName.contains(':')) {
+      return false;
+    }
+    
+    // Исключаем устройства с невалидными именами
+    if (deviceName == 'Неизвестное устройство' || deviceName == 'Ошибка устройства') {
+      return false;
+    }
+    
+    // Если имя начинается с "Неизвестное" или похоже на автосгенерированное - не подключаемое
+    if (deviceName.startsWith('Неизвестное') || deviceName.length < 3) {
+      return false;
+    }
+    
+    // Остальные устройства с нормальными именами считаем подключаемыми
+    return true;
   }
 }

@@ -129,10 +129,19 @@ class LogsScreen extends StatelessWidget {
                 // Информация об устройстве
                 if (log.deviceName != null || log.deviceId != null) ...[
                   const SizedBox(height: 16),
-                  _buildLogInfoSection('Устройство', {
-                    if (log.deviceName != null) 'Название': log.deviceName!,
-                    if (log.deviceId != null) 'ID': log.deviceId!,
-                  }),
+                  _buildDeviceInfo(log),
+                ],
+
+                // Информация о сервисах (если есть)
+                if (_hasServicesInfo(log)) ...[
+                  const SizedBox(height: 16),
+                  _buildServicesInfo(log),
+                ],
+
+                // Анализ данных (если есть)
+                if (_hasDataAnalysis(log)) ...[
+                  const SizedBox(height: 16),
+                  _buildDataAnalysis(log),
                 ],
 
                 // Дополнительные данные
@@ -383,6 +392,267 @@ class LogsScreen extends StatelessWidget {
         (value is String && value.length > 0));
     }
     return false;
+  }
+
+  bool _hasServicesInfo(BluetoothLogEntity log) {
+    return log.additionalData != null && 
+           log.additionalData!.containsKey('services') &&
+           log.additionalData!['services'] is List;
+  }
+
+  bool _hasDataAnalysis(BluetoothLogEntity log) {
+    return log.additionalData != null && 
+           log.additionalData!.containsKey('analysis') &&
+           log.additionalData!['analysis'] is Map;
+  }
+
+  Widget _buildServicesInfo(BluetoothLogEntity log) {
+    final services = log.additionalData!['services'] as List;
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Сервисы устройства (${services.length})',
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: Colors.purple.shade700,
+          ),
+        ),
+        const SizedBox(height: 8),
+        ...services.asMap().entries.map((entry) {
+          final index = entry.key;
+          final service = entry.value as Map<String, dynamic>;
+          final characteristics = service['characteristics'] as List? ?? [];
+          
+          return Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.purple.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.purple.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.bluetooth, color: Colors.purple.shade600, size: 16),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Сервис ${index + 1}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.purple.shade700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'UUID: ${service['uuid']}',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontFamily: 'monospace',
+                    color: Colors.purple.shade600,
+                  ),
+                ),
+                Text(
+                  'Тип: ${service['type']}',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.purple.shade600,
+                  ),
+                ),
+                if (characteristics.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Характеристики (${characteristics.length}):',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.purple.shade700,
+                    ),
+                  ),
+                  ...characteristics.take(3).map((char) {
+                    final charMap = char as Map<String, dynamic>;
+                    return Padding(
+                      padding: const EdgeInsets.only(left: 8, top: 2),
+                      child: Text(
+                        '• ${charMap['uuid']} (свойства: ${charMap['properties']})',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontFamily: 'monospace',
+                          color: Colors.purple.shade600,
+                        ),
+                      ),
+                    );
+                  }),
+                  if (characteristics.length > 3)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 8, top: 2),
+                      child: Text(
+                        '... и еще ${characteristics.length - 3}',
+                        style: TextStyle(
+                          fontSize: 9,
+                          color: Colors.purple.shade500,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          );
+        }),
+      ],
+    );
+  }
+
+  Widget _buildDataAnalysis(BluetoothLogEntity log) {
+    final analysis = log.additionalData!['analysis'] as Map<String, dynamic>;
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Анализ данных',
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: Colors.green.shade700,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.green.shade50,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.green.shade200),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (analysis['interpretation'] != null) ...[
+                _buildAnalysisRow('Интерпретация', analysis['interpretation'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['type'] != null) ...[
+                _buildAnalysisRow('Тип данных', analysis['type'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['command'] != null) ...[
+                _buildAnalysisRow('Команда', analysis['command'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['value'] != null) ...[
+                _buildAnalysisRow('Значение', analysis['value'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['hex'] != null) ...[
+                _buildAnalysisRow('HEX', analysis['hex'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['decimal'] != null) ...[
+                _buildAnalysisRow('Десятичное', analysis['decimal'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['utf8'] != null) ...[
+                _buildAnalysisRow('UTF-8', analysis['utf8'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['littleEndian'] != null) ...[
+                _buildAnalysisRow('Little Endian', analysis['littleEndian'].toString()),
+                const SizedBox(height: 8),
+              ],
+              if (analysis['bigEndian'] != null) ...[
+                _buildAnalysisRow('Big Endian', analysis['bigEndian'].toString()),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAnalysisRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 100,
+          child: Text(
+            '$label:',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Colors.green.shade700,
+            ),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            value,
+            style: TextStyle(
+              fontSize: 11,
+              fontFamily: 'monospace',
+              color: Colors.green.shade800,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDeviceInfo(BluetoothLogEntity log) {
+    final deviceInfo = <String, dynamic>{};
+    
+    if (log.deviceName != null) {
+      deviceInfo['Название'] = log.deviceName!;
+    }
+    if (log.deviceId != null) {
+      deviceInfo['ID'] = log.deviceId!;
+    }
+    
+    // Добавляем дополнительную информацию об устройстве из additionalData
+    if (log.additionalData != null) {
+      if (log.additionalData!['deviceType'] != null) {
+        deviceInfo['Тип устройства'] = log.additionalData!['deviceType'];
+      }
+      if (log.additionalData!['bondState'] != null) {
+        deviceInfo['Состояние связи'] = _getBondStateString(log.additionalData!['bondState']);
+      }
+      if (log.additionalData!['deviceClass'] != null) {
+        deviceInfo['Класс устройства'] = log.additionalData!['deviceClass'];
+      }
+      if (log.additionalData!['deviceClassString'] != null) {
+        deviceInfo['Класс (описание)'] = log.additionalData!['deviceClassString'];
+      }
+    }
+    
+    return _buildLogInfoSection('Устройство', deviceInfo);
+  }
+
+  String _getBondStateString(dynamic bondState) {
+    if (bondState == null) return 'Неизвестно';
+    
+    final state = bondState.toString();
+    switch (state) {
+      case '10':
+        return 'Не связан';
+      case '11':
+        return 'Связывается';
+      case '12':
+        return 'Связан';
+      default:
+        return 'Неизвестно ($state)';
+    }
   }
 
   String _getLogLevelString(LogLevel level) {

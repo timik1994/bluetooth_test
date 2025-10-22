@@ -6,6 +6,7 @@ import '../../domain/entities/bluetooth_log_entity.dart';
 import '../models/bluetooth_device_model.dart';
 import '../models/bluetooth_log_model.dart';
 import '../../../../core/utils/permission_helper.dart';
+import '../services/app_logger.dart';
 
 abstract class BluetoothLocalDataSource {
   Stream<List<BluetoothDeviceEntity>> get discoveredDevices;
@@ -36,6 +37,7 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
   
   final List<BluetoothLogEntity> _logs = [];
   final Map<String, BluetoothDevice> _connectedDevices = {};
+  final AppLogger _appLogger = AppLogger();
   
   // Карта для дедупликации устройств по MAC-адресу
   final Map<String, BluetoothDeviceEntity> _discoveredDevicesMap = {};
@@ -49,12 +51,16 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
   // Улучшенное определение устройств
   final Map<String, String> _deviceNameCache = {};
   
-  BluetoothLocalDataSourceImpl() {
-    // Инициализация будет выполнена при первом обращении
-  }
-
   bool _isInitialized = false;
   StreamSubscription? _scanResultsSubscription;
+
+  BluetoothLocalDataSourceImpl() {
+    _initializeAppLogger();
+  }
+
+  void _initializeAppLogger() async {
+    await _appLogger.initialize();
+  }
 
   void _initializeBluetooth() {
     if (_isInitialized) return;
@@ -297,6 +303,36 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
                     },
                   }
                 });
+
+              // Дополнительно логируем через AppLogger для файлов
+              _appLogger.logDeviceDiscovered(
+                improvedDevice.name,
+                deviceId,
+                improvedDevice.rssi,
+                result.advertisementData.serviceUuids.map((u) => u.toString()).toList(),
+                additionalData: {
+                  'deviceType': improvedDevice.deviceType,
+                  'isConnectable': improvedDevice.isConnectable,
+                  'isBonded': improvedDevice.isBonded,
+                  'manufacturerData': result.advertisementData.manufacturerData.map((key, value) => 
+                    MapEntry(key.toString(), {
+                      'company_id': key,
+                      'data_length': value.length,
+                      'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
+                      'raw_data_bytes': value,
+                    })),
+                  'txPowerLevel': result.advertisementData.txPowerLevel,
+                  'localName': result.advertisementData.localName,
+                  'platformName': result.device.platformName,
+                  'serviceData': result.advertisementData.serviceData.map((key, value) => 
+                    MapEntry(key.toString(), {
+                      'service_uuid': key.toString(),
+                      'data_length': value.length,
+                      'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
+                      'raw_data_bytes': value,
+                    })),
+                },
+              );
               
               print('Найдено устройство: ${improvedDevice.name} | ${improvedDevice.deviceType} | RSSI: ${improvedDevice.rssi}');
               _updateDeviceList(); // Сразу обновляем UI
@@ -368,6 +404,7 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
           deviceType: device.deviceType,
           isClassicBluetooth: device.isClassicBluetooth,
           isBonded: device.isBonded,
+          isConnectable: device.isConnectable,
         );
       }
     }
@@ -426,6 +463,7 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
       deviceType: _getImprovedDeviceType(bestName, device.serviceUuids),
       isClassicBluetooth: device.isClassicBluetooth,
       isBonded: device.isBonded,
+      isConnectable: device.isConnectable,
     );
   }
 
@@ -727,6 +765,22 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
           'service_count': services.length,
           'service_uuids': services.map((s) => s.uuid.toString()).toList(),
         });
+
+      // Логируем информацию о сервисах через AppLogger
+      final servicesInfo = services.map((service) => {
+        'uuid': service.uuid.toString(),
+        'type': 'primary', // BluetoothService не имеет свойства type, используем значение по умолчанию
+        'characteristics': service.characteristics.map((char) => {
+          'uuid': char.uuid.toString(),
+          'properties': char.properties.toString(),
+        }).toList(),
+      }).toList();
+
+      await _appLogger.logDeviceServices(
+        deviceName,
+        device.remoteId.toString(),
+        servicesInfo,
+      );
       
       for (var service in services) {
         _addLog(LogLevel.debug, '🔍 Сервис: ${service.uuid}', 
