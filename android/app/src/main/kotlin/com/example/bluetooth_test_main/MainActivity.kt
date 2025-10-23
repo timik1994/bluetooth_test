@@ -1,6 +1,7 @@
 package com.example.bluetooth_test_main
 
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -337,14 +338,14 @@ class MainActivity : FlutterActivity() {
                             ))
                         }
                         
-                        val connectionData = mapOf(
+                        val connectionData = mapOf<String, Any>(
                             "deviceName" to (device.name ?: "Неизвестное устройство"),
                             "deviceAddress" to device.address,
                             "deviceType" to device.type,
                             "bondState" to device.bondState,
                             "isConnected" to true,
                             "services" to servicesInfo,
-                            "deviceClass" to device.bluetoothClass?.majorDeviceClass ?: -1,
+                            "deviceClass" to (device.bluetoothClass?.majorDeviceClass ?: -1),
                             "deviceClassString" to getDeviceClassString(device.bluetoothClass?.majorDeviceClass ?: -1),
                             "timestamp" to System.currentTimeMillis()
                         )
@@ -649,16 +650,16 @@ class MainActivity : FlutterActivity() {
     
     private fun getDeviceClassString(deviceClass: Int): String {
         return when (deviceClass) {
-            BluetoothClass.Device.Major.AUDIO_VIDEO -> "Аудио/Видео"
-            BluetoothClass.Device.Major.COMPUTER -> "Компьютер"
-            BluetoothClass.Device.Major.HEALTH -> "Здоровье/Фитнес"
-            BluetoothClass.Device.Major.IMAGING -> "Изображения"
-            BluetoothClass.Device.Major.MISC -> "Разное"
-            BluetoothClass.Device.Major.NETWORKING -> "Сеть"
-            BluetoothClass.Device.Major.PERIPHERAL -> "Периферия"
-            BluetoothClass.Device.Major.PHONE -> "Телефон"
-            BluetoothClass.Device.Major.TOY -> "Игрушка"
-            BluetoothClass.Device.Major.WEARABLE -> "Носимые устройства"
+            0x200 -> "Аудио/Видео"
+            0x100 -> "Компьютер"
+            0x900 -> "Здоровье/Фитнес"
+            0x600 -> "Изображения"
+            0x000 -> "Разное"
+            0x300 -> "Сеть"
+            0x500 -> "Периферия"
+            0x200 -> "Телефон"
+            0x800 -> "Игрушка"
+            0x700 -> "Носимые устройства"
             else -> "Неизвестный класс ($deviceClass)"
         }
     }

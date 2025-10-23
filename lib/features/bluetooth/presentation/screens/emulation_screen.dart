@@ -28,6 +28,7 @@ class _EmulationScreenState extends State<EmulationScreen> {
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _deviceConnectedSubscription;
   StreamSubscription? _dataReceivedSubscription;
+  bool _isDataModalOpen = false; // Флаг, чтобы не открывать модалку повторно
 
   @override
   void dispose() {
@@ -104,7 +105,7 @@ class _EmulationScreenState extends State<EmulationScreen> {
         print('EmulationScreen: Адрес: $deviceAddress');
         print('EmulationScreen: Bond: $bondState, Connected: $isConnected');
         
-        // Показываем уведомление о подключении
+        // Показываем уведомление о подключении (без авто-действия)
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Column(
@@ -117,25 +118,15 @@ class _EmulationScreenState extends State<EmulationScreen> {
               ],
             ),
             backgroundColor: Colors.green,
-            action: SnackBarAction(
-              label: 'Открыть данные',
-              textColor: Colors.white,
-              onPressed: () {
-                _openTreadmillDataModal(deviceName, deviceAddress);
-              },
-            ),
-            duration: const Duration(seconds: 8),
+            duration: const Duration(seconds: 6),
           ),
         );
         
-        // Автоматически открываем модальное окно с данными через короткую задержку
-        print('EmulationScreen: Автоматическое открытие модального окна данных через 1.5 секунды...');
-        Future.delayed(const Duration(milliseconds: 1500), () {
-          if (mounted) {
-            print('EmulationScreen: Открываем модальное окно данных для $deviceName');
-            _openTreadmillDataModal(deviceName, deviceAddress);
-          }
-        });
+        // Открываем модалку сразу при подключении (один раз)
+        if (!_isDataModalOpen) {
+          print('EmulationScreen: Открываем модальное окно данных для $deviceName');
+          _openTreadmillDataModal(deviceName, deviceAddress);
+        }
       }
     });
 
@@ -563,6 +554,8 @@ class _EmulationScreenState extends State<EmulationScreen> {
   }
 
   void _openTreadmillDataModal(String deviceName, String deviceAddress) {
+    if (_isDataModalOpen) return;
+    _isDataModalOpen = true;
     showDialog(
       context: context,
       barrierDismissible: false, // Нельзя закрыть случайно
@@ -570,7 +563,10 @@ class _EmulationScreenState extends State<EmulationScreen> {
         deviceName: deviceName,
         deviceAddress: deviceAddress,
       ),
-    );
+    ).whenComplete(() {
+      // Сбрасываем флаг, когда модалка закрыта
+      _isDataModalOpen = false;
+    });
   }
 
 }

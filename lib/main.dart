@@ -5,11 +5,19 @@ import 'features/bluetooth/presentation/bloc/bluetooth_bloc.dart';
 import 'features/bluetooth/presentation/screens/home_screen.dart';
 import 'features/bluetooth/presentation/theme/theme_toggle_notification.dart';
 import 'shared/theme/app_themes.dart';
+import 'shared/theme/theme_styles.dart';
+import 'shared/theme/style_change_notification.dart';
 
 class _ThemeController {
   final ValueNotifier<ThemeMode> mode = ValueNotifier(ThemeMode.light);
+  final ValueNotifier<bool> needsRebuild = ValueNotifier(false);
+  
   void toggle() {
     mode.value = mode.value == ThemeMode.light ? ThemeMode.dark : ThemeMode.light;
+  }
+  
+  void rebuild() {
+    needsRebuild.value = !needsRebuild.value;
   }
 }
 
@@ -40,19 +48,36 @@ class MyApp extends StatelessWidget {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: _themeController.mode,
       builder: (context, mode, _) {
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          title: 'Bluetooth Тестер',
-          themeMode: mode,
-          theme: AppThemes.lightTheme,
-          darkTheme: AppThemes.darkTheme,
-          home: BlocProvider(
-            create: (context) => di.sl<BluetoothBloc>(),
-            child: NotificationListener<ThemeToggleNotification>(
-              onNotification: (_) { _themeController.toggle(); return true; },
-              child: const HomeScreen(),
-            ),
-          ),
+        return ValueListenableBuilder<bool>(
+          valueListenable: _themeController.needsRebuild,
+          builder: (context, _, __) {
+            return MaterialApp(
+              debugShowCheckedModeBanner: false,
+              title: 'Bluetooth Тестер',
+              themeMode: mode,
+              theme: AppThemes.getLightTheme(),
+              darkTheme: AppThemes.getDarkTheme(),
+              home: BlocProvider(
+                create: (context) => di.sl<BluetoothBloc>(),
+                child: NotificationListener<ThemeToggleNotification>(
+                  onNotification: (_) { _themeController.toggle(); return true; },
+                  child: NotificationListener<StyleChangeNotification>(
+                    onNotification: (notification) {
+                      if (notification.appBarStyle != null) {
+                        ThemeStyleManager.setAppBarStyle(notification.appBarStyle!);
+                      }
+                      if (notification.bottomNavStyle != null) {
+                        ThemeStyleManager.setBottomNavStyle(notification.bottomNavStyle!);
+                      }
+                      _themeController.rebuild();
+                      return true;
+                    },
+                    child: const HomeScreen(),
+                  ),
+                ),
+              ),
+            );
+          },
         );
       },
     );

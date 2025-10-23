@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'style_themes.dart';
+import 'theme_styles.dart';
 
 class AppThemes {
   // Основной цвет приложения
@@ -174,4 +176,25 @@ class AppThemes {
       ),
     ),
   );
+
+  // Методы для получения динамических тем
+  static ThemeData getLightTheme() {
+    final currentAppBarStyle = ThemeStyleManager.currentAppBarStyle;
+    final currentBottomNavStyle = ThemeStyleManager.currentBottomNavStyle;
+    
+    return lightTheme.copyWith(
+      appBarTheme: StyleThemes.getAppBarTheme(currentAppBarStyle, false),
+      bottomNavigationBarTheme: StyleThemes.getBottomNavTheme(currentBottomNavStyle, false),
+    );
+  }
+
+  static ThemeData getDarkTheme() {
+    final currentAppBarStyle = ThemeStyleManager.currentAppBarStyle;
+    final currentBottomNavStyle = ThemeStyleManager.currentBottomNavStyle;
+    
+    return darkTheme.copyWith(
+      appBarTheme: StyleThemes.getAppBarTheme(currentAppBarStyle, true),
+      bottomNavigationBarTheme: StyleThemes.getBottomNavTheme(currentBottomNavStyle, true),
+    );
+  }
 }

@@ -4,6 +4,9 @@ import '../bloc/bluetooth_bloc.dart';
 import '../bloc/bluetooth_state.dart';
 import '../theme/theme_toggle_notification.dart';
 import '../components/notification.dart';
+import '../widgets/style_selector.dart';
+import '../widgets/custom_app_bar.dart';
+import '../widgets/custom_bottom_nav.dart';
 import 'permissions_screen.dart';
 import 'devices_screen.dart';
 import 'logs_screen.dart';
@@ -26,18 +29,21 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Bluetooth Тестер'),
+      appBar: CustomAppBar(
+        title: 'Bluetooth Тестер',
+        isDark: isDark,
         actions: [
+          // Селектор стилей
+          const StyleSelector(),
           // Переключатель темы
           Builder(
             builder: (context) {
               return IconButton(
                 tooltip: 'Переключить тему',
-                icon: Icon(Theme.of(context).brightness == Brightness.dark
-                    ? Icons.dark_mode
-                    : Icons.light_mode),
+                icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
                 onPressed: () {
                   ThemeToggleNotification().dispatch(context);
                 },
@@ -60,9 +66,9 @@ class _HomeScreenState extends State<HomeScreen> {
           children: _screens,
         ),
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
+      bottomNavigationBar: CustomBottomNavigationBar(
         currentIndex: _currentIndex,
+        isDark: isDark,
         onTap: (index) {
           setState(() {
             _currentIndex = index;
