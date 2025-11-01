@@ -50,6 +50,9 @@ dependencies:
   logger: ^2.0.2+1
   path_provider: ^2.1.1
   toastification: ^3.0.3
+  
+  # Local storage
+  shared_preferences: ^2.2.2
 
 dev_dependencies:
   flutter_test:

@@ -26,7 +26,7 @@ class BluetoothState extends Equatable {
     this.connectingDevices = const {},
     this.connectedDevices = const {},
     this.previouslyConnectedDevices = const {},
-    this.showAllDevices = false,
+    this.showAllDevices = true,
   });
 
   BluetoothState copyWith({

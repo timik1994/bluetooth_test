@@ -4,6 +4,7 @@ import '../bloc/bluetooth_bloc.dart';
 import '../bloc/bluetooth_event.dart';
 import '../bloc/bluetooth_state.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
+import '../../../../core/utils/ble_uuid_decoder.dart';
 
 class LogsScreen extends StatelessWidget {
   const LogsScreen({super.key});
@@ -147,7 +148,7 @@ class LogsScreen extends StatelessWidget {
                 // Дополнительные данные
                 if (log.additionalData != null && log.additionalData!.isNotEmpty) ...[
                   const SizedBox(height: 16),
-                  _buildLogInfoSection('Дополнительные данные', log.additionalData!),
+                  _buildLogInfoSection('Дополнительные данные', _formatAdditionalData(log.additionalData!)),
                 ],
 
                 // Анализ данных на наличие байтов
@@ -226,41 +227,68 @@ class LogsScreen extends StatelessWidget {
 
   Widget _buildRawDataAnalysis(BluetoothLogEntity log) {
     // Ищем байтовые данные в additionalData
-    Map<String, dynamic> bytesData = {};
+    Map<String, List<int>> rawBytesData = {};
     Map<String, String> decodedData = {};
+    Map<String, String> hexData = {};
+    Map<String, dynamic> interpretedData = {};
 
     if (log.additionalData != null) {
       for (var entry in log.additionalData!.entries) {
+        List<int>? bytes;
+        
+        // Проверяем различные форматы данных
         if (entry.value is List<int>) {
-          final bytes = entry.value as List<int>;
-          bytesData['${entry.key} (bytes)'] = bytes;
-          decodedData['${entry.key} (hex)'] = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-          decodedData['${entry.key} (decimal)'] = bytes.join(' ');
-          
-          // Попытка декодирования
-          try {
-            final decoded = String.fromCharCodes(bytes);
-            if (RegExp(r'^[\x20-\x7E\x0A\x0D\x09]*$').hasMatch(decoded) && decoded.trim().isNotEmpty) {
-              decodedData['${entry.key} (UTF-8)'] = decoded;
-            }
-          } catch (e) {
-            decodedData['${entry.key} (UTF-8)'] = 'Ошибка декодирования';
+          bytes = entry.value as List<int>;
+        } else if (entry.value is String) {
+          final strValue = entry.value as String;
+          // Пропускаем строки, которые уже являются декодированными значениями
+          if (!strValue.contains(' ') && strValue.length < 50) {
+            continue;
           }
-        } else if (entry.value is String && entry.value.length > 0) {
-          // Попытка интерпретации строки как байты
+          // Пытаемся интерпретировать как hex строку
+          if (RegExp(r'^[0-9A-Fa-f\s]+$').hasMatch(strValue)) {
+            final hexStr = strValue.replaceAll(' ', '');
+            if (hexStr.length % 2 == 0) {
+              bytes = [];
+              for (int i = 0; i < hexStr.length; i += 2) {
+                final byteStr = hexStr.substring(i, i + 2);
+                bytes.add(int.parse(byteStr, radix: 16));
+              }
+            }
+          }
+        }
+        
+        if (bytes != null && bytes.isNotEmpty) {
+          final key = entry.key;
+          rawBytesData[key] = bytes;
+          
+          // HEX представление
+          hexData['$key (hex)'] = bytes.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+          
+          // Декодирование UTF-8
           try {
-            final bytes = (entry.value as String).codeUnits;
-            if (bytes.length <= 100) { // Ограничиваем для читаемости
-              decodedData['${entry.key} (codeUnits)'] = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+            final utf8Decoded = String.fromCharCodes(bytes);
+            // Проверяем, что это действительно читаемый текст
+            final hasReadableChars = utf8Decoded.codeUnits.any((c) => 
+              (c >= 32 && c <= 126) || c == 9 || c == 10 || c == 13
+            );
+            if (utf8Decoded.isNotEmpty && hasReadableChars && utf8Decoded.trim().isNotEmpty) {
+              decodedData['$key (UTF-8)'] = utf8Decoded;
             }
           } catch (e) {
-            // Игнорируем
+            // Игнорируем ошибки декодирования
+          }
+          
+          // Интерпретация данных
+          final interpretation = _interpretBytes(bytes, key);
+          if (interpretation.isNotEmpty) {
+            interpretedData[key] = interpretation;
           }
         }
       }
     }
 
-    if (decodedData.isEmpty) {
+    if (hexData.isEmpty && decodedData.isEmpty && interpretedData.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -277,61 +305,8 @@ class LogsScreen extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         
-        // HEX представление
-        if (decodedData.values.any((v) => v.contains(' '))) ...[
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.blue.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.blue.shade200),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'HEX представление:',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.blue.shade700,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                ...decodedData.entries.where((e) => e.key.contains('hex') || e.value.contains(' '))
-                  .map((entry) => Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          entry.key,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.blue.shade600,
-                          ),
-                        ),
-                        SelectableText(
-                          entry.value,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontFamily: 'monospace',
-                            color: Colors.blue.shade800,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )),
-              ],
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-
-        // Декодированные строки
-        if (decodedData.values.any((v) => !v.contains(' ') && v.length > 0)) ...[
+        // Декодированные строки (самое важное)
+        if (decodedData.isNotEmpty) ...[
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),
@@ -343,46 +318,203 @@ class LogsScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Декодированные данные:',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.green.shade700,
-                  ),
+                Row(
+                  children: [
+                    Icon(Icons.text_fields, size: 16, color: Colors.green.shade700),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Декодированные данные:',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.green.shade700,
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
-                ...decodedData.entries.where((e) => !e.key.contains('hex') && !e.key.contains('decimal') && !e.value.contains(' '))
-                  .map((entry) => Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          entry.key,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.green.shade600,
-                          ),
+                ...decodedData.entries.map((entry) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.key.replaceAll(' (UTF-8)', ''),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.green.shade600,
                         ),
-                        SelectableText(
-                          entry.value,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontFamily: 'monospace',
-                            color: Colors.green.shade800,
-                          ),
+                      ),
+                      const SizedBox(height: 2),
+                      SelectableText(
+                        entry.value,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                          color: Colors.green.shade800,
+                          fontWeight: FontWeight.w500,
                         ),
-                      ],
+                      ),
+                    ],
+                  ),
+                )),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+
+        // Интерпретация данных
+        if (interpretedData.isNotEmpty) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.orange.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orange.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.insights, size: 16, color: Colors.orange.shade700),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Интерпретация:',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.orange.shade700,
+                      ),
                     ),
-                  )),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ...interpretedData.entries.map((entry) => Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: SelectableText(
+                    entry.value.toString(),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.orange.shade800,
+                    ),
+                  ),
+                )),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+
+        // HEX представление (технические детали)
+        if (hexData.isNotEmpty) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.blue.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.code, size: 16, color: Colors.blue.shade700),
+                    const SizedBox(width: 8),
+                    Text(
+                      'HEX представление:',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.blue.shade700,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ...hexData.entries.map((entry) => Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.key,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.blue.shade600,
+                        ),
+                      ),
+                      SelectableText(
+                        entry.value,
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          color: Colors.blue.shade800,
+                        ),
+                      ),
+                    ],
+                  ),
+                )),
               ],
             ),
           ),
         ],
       ],
     );
+  }
+
+  /// Интерпретирует байты в понятный формат
+  String _interpretBytes(List<int> bytes, String key) {
+    if (bytes.isEmpty) return '';
+    
+    final interpretations = <String>[];
+    
+    // Анализ по размеру
+    if (bytes.length == 1) {
+      interpretations.add('Однобайтовое значение: ${bytes[0]} (0x${bytes[0].toRadixString(16).padLeft(2, '0').toUpperCase()})');
+    } else if (bytes.length == 2) {
+      final littleEndian = (bytes[1] << 8) | bytes[0];
+      final bigEndian = (bytes[0] << 8) | bytes[1];
+      interpretations.add('16-битное значение: Little Endian=$littleEndian, Big Endian=$bigEndian');
+    } else if (bytes.length == 4) {
+      final littleEndian = (bytes[3] << 24) | (bytes[2] << 16) | (bytes[1] << 8) | bytes[0];
+      final bigEndian = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+      interpretations.add('32-битное значение: Little Endian=$littleEndian, Big Endian=$bigEndian');
+    }
+    
+    // Попытка интерпретации как число
+    if (bytes.length <= 8) {
+      try {
+        int value = 0;
+        for (int i = 0; i < bytes.length; i++) {
+          value |= bytes[i] << (i * 8);
+        }
+        interpretations.add('Как число: $value');
+      } catch (e) {
+        // Игнорируем
+      }
+    }
+    
+    // Анализ для конкретных UUID
+    if (key.contains('characteristicUuid') || key.contains('serviceUuid')) {
+      final uuidStr = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join('').toUpperCase();
+      if (uuidStr.length == 4) {
+        final decoded = key.contains('characteristicUuid')
+            ? BleUuidDecoder.decodeCharacteristicUuid(uuidStr)
+            : BleUuidDecoder.decodeServiceUuid(uuidStr);
+        if (decoded != uuidStr) {
+          interpretations.add('Декодированный UUID: $decoded');
+        }
+      }
+    }
+    
+    return interpretations.join('; ');
   }
 
   bool _hasRawData(BluetoothLogEntity log) {
@@ -423,8 +555,13 @@ class LogsScreen extends StatelessWidget {
         const SizedBox(height: 8),
         ...services.asMap().entries.map((entry) {
           final index = entry.key;
-          final service = entry.value as Map<String, dynamic>;
+          final service = Map<String, dynamic>.from(entry.value as Map);
           final characteristics = service['characteristics'] as List? ?? [];
+          final serviceUuid = service['uuid']?.toString() ?? 'Неизвестно';
+          final decodedServiceName = BleUuidDecoder.decodeServiceUuid(serviceUuid);
+          final serviceDisplayName = decodedServiceName != serviceUuid 
+              ? '$decodedServiceName' 
+              : null;
           
           return Container(
             margin: const EdgeInsets.only(bottom: 8),
@@ -442,35 +579,50 @@ class LogsScreen extends StatelessWidget {
                     Icon(Icons.bluetooth, color: Colors.purple.shade600, size: 16),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        'Сервис ${index + 1}',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.purple.shade700,
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            serviceDisplayName ?? 'Сервис ${index + 1}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.purple.shade700,
+                            ),
+                          ),
+                          if (serviceDisplayName != null)
+                            Text(
+                              'Сервис ${index + 1}',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.purple.shade600,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'UUID: ${service['uuid']}',
+                  'UUID: $serviceUuid',
                   style: TextStyle(
                     fontSize: 10,
                     fontFamily: 'monospace',
                     color: Colors.purple.shade600,
                   ),
                 ),
-                Text(
-                  'Тип: ${service['type']}',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Colors.purple.shade600,
+                if (service['type'] != null)
+                  Text(
+                    'Тип: ${service['type']}',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.purple.shade600,
+                    ),
                   ),
-                ),
                 if (characteristics.isNotEmpty) ...[
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Text(
                     'Характеристики (${characteristics.length}):',
                     style: TextStyle(
@@ -479,31 +631,74 @@ class LogsScreen extends StatelessWidget {
                       color: Colors.purple.shade700,
                     ),
                   ),
-                  ...characteristics.take(3).map((char) {
-                    final charMap = char as Map<String, dynamic>;
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 8, top: 2),
-                      child: Text(
-                        '• ${charMap['uuid']} (свойства: ${charMap['properties']})',
-                        style: TextStyle(
-                          fontSize: 9,
-                          fontFamily: 'monospace',
-                          color: Colors.purple.shade600,
-                        ),
+                  const SizedBox(height: 4),
+                  ...characteristics.map((char) {
+                    final charMap = Map<String, dynamic>.from(char as Map);
+                    final charUuid = charMap['uuid']?.toString() ?? 'Неизвестно';
+                    final decodedCharName = BleUuidDecoder.decodeCharacteristicUuid(charUuid);
+                    final properties = BleUuidDecoder.formatCharacteristicProperties(charMap['properties']);
+                    
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 4),
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: Colors.purple.shade300),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '• ',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.purple.shade700,
+                                ),
+                              ),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (decodedCharName != charUuid)
+                                      Text(
+                                        decodedCharName,
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.purple.shade700,
+                                        ),
+                                      ),
+                                    Text(
+                                      'UUID: $charUuid',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontFamily: 'monospace',
+                                        color: Colors.purple.shade600,
+                                      ),
+                                    ),
+                                    if (properties.isNotEmpty) ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        'Свойства: $properties',
+                                        style: TextStyle(
+                                          fontSize: 9,
+                                          color: Colors.purple.shade600,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     );
                   }),
-                  if (characteristics.length > 3)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 8, top: 2),
-                      child: Text(
-                        '... и еще ${characteristics.length - 3}',
-                        style: TextStyle(
-                          fontSize: 9,
-                          color: Colors.purple.shade500,
-                        ),
-                      ),
-                    ),
                 ],
               ],
             ),
@@ -514,7 +709,7 @@ class LogsScreen extends StatelessWidget {
   }
 
   Widget _buildDataAnalysis(BluetoothLogEntity log) {
-    final analysis = log.additionalData!['analysis'] as Map<String, dynamic>;
+    final analysis = Map<String, dynamic>.from(log.additionalData!['analysis'] as Map);
     
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -669,10 +864,12 @@ class LogsScreen extends StatelessWidget {
   }
 
   String _formatDetailedTimestamp(DateTime timestamp) {
-    return '${timestamp.hour.toString().padLeft(2, '0')}:'
+    return '${timestamp.day.toString().padLeft(2, '0')}.'
+        '${timestamp.month.toString().padLeft(2, '0')}.'
+        '${timestamp.year} '
+        '${timestamp.hour.toString().padLeft(2, '0')}:'
         '${timestamp.minute.toString().padLeft(2, '0')}:'
-        '${timestamp.second.toString().padLeft(2, '0')}.'
-        '${timestamp.millisecond.toString().padLeft(3, '0')}';
+        '${timestamp.second.toString().padLeft(2, '0')}';
   }
 
   String _formatFullTimestamp(DateTime timestamp) {
@@ -681,8 +878,7 @@ class LogsScreen extends StatelessWidget {
         '${timestamp.year} '
         '${timestamp.hour.toString().padLeft(2, '0')}:'
         '${timestamp.minute.toString().padLeft(2, '0')}:'
-        '${timestamp.second.toString().padLeft(2, '0')}.'
-        '${timestamp.millisecond.toString().padLeft(3, '0')}';
+        '${timestamp.second.toString().padLeft(2, '0')}';
   }
 
   IconData _getLogIcon(LogLevel level) {
@@ -709,5 +905,48 @@ class LogsScreen extends StatelessWidget {
       case LogLevel.debug:
         return Colors.grey;
     }
+  }
+
+  /// Форматирует дополнительные данные, декодируя UUID где возможно
+  Map<String, dynamic> _formatAdditionalData(Map<String, dynamic> data) {
+    final formatted = <String, dynamic>{};
+    
+    for (var entry in data.entries) {
+      final key = entry.key;
+      final value = entry.value;
+      
+      // Форматируем timestamp в нужный формат
+      if (key == 'timestamp' && value is String) {
+        try {
+          // Пытаемся распарсить ISO8601 формат и преобразовать в нужный формат
+          final dateTime = DateTime.parse(value);
+          formatted[key] = _formatFullTimestamp(dateTime);
+        } catch (e) {
+          // Если не удалось распарсить, оставляем как есть
+          formatted[key] = value;
+        }
+      }
+      // Декодируем UUID сервисов и характеристик
+      else if (key.contains('Uuid') || key.contains('uuid')) {
+        if (value is String) {
+          final decoded = key.toLowerCase().contains('characteristic')
+              ? BleUuidDecoder.formatCharacteristicUuid(value)
+              : BleUuidDecoder.formatUuid(value);
+          formatted[key] = decoded;
+        } else {
+          formatted[key] = value;
+        }
+      } else if (key == 'action' && value is String) {
+        // Форматируем action в читаемый вид
+        formatted[key] = value.replaceAll('_', ' ').split(' ').map((word) {
+          if (word.isEmpty) return word;
+          return word[0].toUpperCase() + word.substring(1).toLowerCase();
+        }).join(' ');
+      } else {
+        formatted[key] = value;
+      }
+    }
+    
+    return formatted;
   }
 }

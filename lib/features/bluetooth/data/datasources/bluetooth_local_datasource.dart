@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide LogLevel;
 import 'package:permission_handler/permission_handler.dart';
 import '../../domain/entities/bluetooth_device_entity.dart';
@@ -56,6 +57,7 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
 
   BluetoothLocalDataSourceImpl() {
     _initializeAppLogger();
+    _initializeBluetooth(); // Инициализируем сразу при создании
   }
 
   void _initializeAppLogger() async {
@@ -68,12 +70,22 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
     
     // Слушаем изменения состояния Bluetooth
     FlutterBluePlus.adapterState.listen((state) {
-      _isBluetoothEnabledController.add(state == BluetoothAdapterState.on);
+      final isEnabled = state == BluetoothAdapterState.on;
+      _isBluetoothEnabledController.add(isEnabled);
+      _addLog(LogLevel.info, 'Bluetooth состояние изменилось: ${isEnabled ? "Включен" : "Выключен"}');
     });
     
     // Слушаем изменения состояния сканирования
     FlutterBluePlus.isScanning.listen((scanning) {
       _isScanningController.add(scanning);
+    });
+    
+    // Получаем текущее состояние Bluetooth сразу
+    FlutterBluePlus.adapterState.first.then((state) {
+      final isEnabled = state == BluetoothAdapterState.on;
+      _isBluetoothEnabledController.add(isEnabled);
+    }).catchError((e) {
+      _addLog(LogLevel.error, 'Ошибка получения начального состояния Bluetooth: $e');
     });
   }
 
@@ -765,6 +777,38 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
           'service_count': services.length,
           'service_uuids': services.map((s) => s.uuid.toString()).toList(),
         });
+      
+      // Задержка после обнаружения сервисов для стабилизации GATT соединения
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Пытаемся получить реальное имя устройства из Device Information Service
+      String? realDeviceName = await _readDeviceNameFromGATT(device, services);
+      if (realDeviceName != null && realDeviceName.isNotEmpty && 
+          _isValidDeviceName(realDeviceName) && 
+          _isBetterDeviceName(realDeviceName, deviceName)) {
+        // Обновляем имя устройства в кэше и карте найденных устройств
+        final deviceId = device.remoteId.toString();
+        _deviceNameCache[deviceId] = realDeviceName;
+        
+        // Обновляем устройство в карте найденных устройств
+        if (_discoveredDevicesMap.containsKey(deviceId)) {
+          final existingDevice = _discoveredDevicesMap[deviceId]!;
+          final updatedDevice = BluetoothDeviceEntity(
+            id: existingDevice.id,
+            name: realDeviceName,
+            isConnected: existingDevice.isConnected,
+            rssi: existingDevice.rssi,
+            serviceUuids: existingDevice.serviceUuids,
+            deviceType: existingDevice.deviceType,
+            isClassicBluetooth: existingDevice.isClassicBluetooth,
+            isBonded: existingDevice.isBonded,
+            isConnectable: existingDevice.isConnectable,
+          );
+          _discoveredDevicesMap[deviceId] = updatedDevice;
+          _updateDeviceList();
+          _addLog(LogLevel.info, '✅ Имя устройства обновлено: "$deviceName" → "$realDeviceName"');
+        }
+      }
 
       // Логируем информацию о сервисах через AppLogger
       final servicesInfo = services.map((service) => {
@@ -801,6 +845,9 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
             }).toList(),
           });
         
+        // Задержка перед обработкой характеристик сервиса для стабильности
+        await Future.delayed(const Duration(milliseconds: 100));
+        
         for (var characteristic in service.characteristics) {
           try {
             // Собираем информацию о характеристике
@@ -819,31 +866,33 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
             // Читаем характеристики, которые поддерживают чтение
             if (characteristic.properties.read) {
               try {
-                final value = await characteristic.read();
-                _addLog(LogLevel.info, '📊 Чтение характеристики "${characteristic.uuid}": ${value.length} байт', 
-                  additionalData: {
-                    ...charInfo,
-                    'operation': 'read',
-                    'data_length': value.length,
-                    'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
-                    'raw_data_decimal': value.join(' '),
-                    'raw_data_bytes': value,
-                    'read_success': true,
-                  });
-                
-                // Попытка декодирования
-                try {
-                  final decoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
-                  if (decoded.isNotEmpty) {
-                    _addLog(LogLevel.debug, '🔤 Декодированные данные: "$decoded"', 
-                      additionalData: {
-                        ...charInfo,
-                        'operation': 'decode',
-                        'decoded_string': decoded,
-                      });
+                final value = await _readCharacteristicWithRetry(characteristic, charInfo);
+                if (value != null) {
+                  _addLog(LogLevel.info, '📊 Чтение характеристики "${characteristic.uuid}": ${value.length} байт', 
+                    additionalData: {
+                      ...charInfo,
+                      'operation': 'read',
+                      'data_length': value.length,
+                      'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
+                      'raw_data_decimal': value.join(' '),
+                      'raw_data_bytes': value,
+                      'read_success': true,
+                    });
+                  
+                  // Попытка декодирования
+                  try {
+                    final decoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
+                    if (decoded.isNotEmpty) {
+                      _addLog(LogLevel.debug, '🔤 Декодированные данные: "$decoded"', 
+                        additionalData: {
+                          ...charInfo,
+                          'operation': 'decode',
+                          'decoded_string': decoded,
+                        });
+                    }
+                  } catch (e) {
+                    // Игнорируем ошибки декодирования
                   }
-                } catch (e) {
-                  // Игнорируем ошибки декодирования
                 }
               } catch (e) {
                 _addLog(LogLevel.warning, '⚠️ Ошибка чтения характеристики ${characteristic.uuid}: $e',
@@ -856,44 +905,13 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
               }
             }
             
+            // Небольшая задержка между операциями для избежания конфликтов
+            await Future.delayed(const Duration(milliseconds: 100));
+            
             // Подписываемся на уведомления
             if (characteristic.properties.notify || characteristic.properties.indicate) {
               try {
-                await characteristic.setNotifyValue(true);
-                characteristic.lastValueStream.listen((value) {
-                  _addLog(LogLevel.info, '📨 Уведомление от "${characteristic.uuid}": ${value.length} байт',
-                    additionalData: {
-                      ...charInfo,
-                      'operation': 'notification_received',
-                      'data_length': value.length,
-                      'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
-                      'raw_data_decimal': value.join(' '),
-                      'raw_data_bytes': value,
-                      'notification_type': characteristic.properties.notify ? 'notify' : 'indicate',
-                      'timestamp': DateTime.now().toIso8601String(),
-                    });
-                  
-                  // Попытка декодирования уведомления
-                  try {
-                    final decoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
-                    if (decoded.isNotEmpty) {
-                      _addLog(LogLevel.debug, '🔔 Декодированное уведомление: "$decoded"',
-                        additionalData: {
-                          ...charInfo,
-                          'operation': 'notification_decode',
-                          'decoded_string': decoded,
-                        });
-                    }
-                  } catch (e) {
-                    // Игнорируем ошибки декодирования
-                  }
-                });
-                _addLog(LogLevel.info, '🔔 Подписались на уведомления от "${characteristic.uuid}"',
-                  additionalData: {
-                    ...charInfo,
-                    'operation': 'subscribe',
-                    'subscription_success': true,
-                  });
+                await _subscribeToNotificationsWithRetry(characteristic, charInfo);
               } catch (e) {
                 _addLog(LogLevel.warning, '⚠️ Ошибка подписки на ${characteristic.uuid}: $e',
                   additionalData: {
@@ -913,6 +931,9 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
                 'error_type': e.runtimeType.toString(),
               });
           }
+          
+          // Задержка между характеристиками для стабильности
+          await Future.delayed(const Duration(milliseconds: 50));
         }
       }
     } catch (e) {
@@ -1046,6 +1067,238 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
   @override
   Future<List<BluetoothLogEntity>> getLogs() async {
     return List.from(_logs);
+  }
+
+  /// Читает характеристику с повторными попытками при ошибках
+  Future<List<int>?> _readCharacteristicWithRetry(
+    BluetoothCharacteristic characteristic,
+    Map<String, dynamic> charInfo, {
+    int maxRetries = 3,
+    Duration initialDelay = const Duration(milliseconds: 500),
+  }) async {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Увеличиваем таймаут для чтения на последних попытках
+        final timeout = attempt == maxRetries 
+            ? const Duration(seconds: 20) 
+            : const Duration(seconds: 10);
+        
+        final value = await characteristic.read().timeout(timeout);
+        return value;
+      } catch (e) {
+        final errorString = e.toString();
+        
+        // Проверяем, является ли ошибка временной (требует повторной попытки)
+        final isRetryableError = errorString.contains('ERROR_GATT_WRITE_REQUEST_BUSY') ||
+            errorString.contains('gatt.readCharacteristic() returned false') ||
+            errorString.contains('Timed out') ||
+            errorString.contains('timeout') ||
+            errorString.contains('BUSY');
+        
+          if (!isRetryableError || attempt == maxRetries) {
+          // Если ошибка не позволяет повторить или это последняя попытка
+          String errorMessage = 'Ошибка чтения характеристики ${characteristic.uuid}';
+          if (errorString.contains('ERROR_GATT_WRITE_REQUEST_BUSY')) {
+            errorMessage = 'Ошибка чтения характеристики ${characteristic.uuid}: GATT занят (попробуйте позже)';
+          } else if (errorString.contains('returned false')) {
+            errorMessage = 'Ошибка чтения характеристики ${characteristic.uuid}: устройство не отвечает';
+          } else if (errorString.contains('Timed out') || errorString.contains('timeout')) {
+            errorMessage = 'Ошибка чтения характеристики ${characteristic.uuid}: превышено время ожидания';
+          }
+          
+          _addLog(LogLevel.error, '$errorMessage${attempt > 1 ? ' (попытка $attempt/$maxRetries)' : ''}: $e',
+            additionalData: {
+              ...charInfo,
+              'operation': 'read_retry',
+              'attempt': attempt,
+              'max_retries': maxRetries,
+              'error': errorString,
+            });
+          
+          if (attempt == maxRetries) {
+            return null; // Последняя попытка не удалась
+          }
+        } else {
+          // Логируем предупреждение о повторной попытке
+          _addLog(LogLevel.warning, '⚠️ Повторная попытка чтения характеристики ${characteristic.uuid} (попытка $attempt/$maxRetries): $e',
+            additionalData: {
+              ...charInfo,
+              'operation': 'read_retry',
+              'attempt': attempt,
+              'max_retries': maxRetries,
+              'error': errorString,
+            });
+          
+          // Увеличиваем задержку с каждой попыткой (exponential backoff)
+          final delay = Duration(milliseconds: initialDelay.inMilliseconds * attempt);
+          await Future.delayed(delay);
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Подписывается на уведомления с повторными попытками при ошибках
+  Future<void> _subscribeToNotificationsWithRetry(
+    BluetoothCharacteristic characteristic,
+    Map<String, dynamic> charInfo, {
+    int maxRetries = 3,
+    Duration initialDelay = const Duration(milliseconds: 500),
+  }) async {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await characteristic.setNotifyValue(true);
+        
+        // Настраиваем слушатель уведомлений
+        characteristic.lastValueStream.listen((value) {
+          _addLog(LogLevel.info, '📨 Уведомление от "${characteristic.uuid}": ${value.length} байт',
+            additionalData: {
+              ...charInfo,
+              'operation': 'notification_received',
+              'data_length': value.length,
+              'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
+              'raw_data_decimal': value.join(' '),
+              'raw_data_bytes': value,
+              'notification_type': characteristic.properties.notify ? 'notify' : 'indicate',
+              'timestamp': AppLogger.formatTimestamp(DateTime.now()),
+            });
+          
+          // Попытка декодирования уведомления
+          try {
+            final decoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
+            if (decoded.isNotEmpty) {
+              _addLog(LogLevel.debug, '🔔 Декодированное уведомление: "$decoded"',
+                additionalData: {
+                  ...charInfo,
+                  'operation': 'notification_decode',
+                  'decoded_string': decoded,
+                });
+            }
+          } catch (e) {
+            // Игнорируем ошибки декодирования
+          }
+        });
+        
+        _addLog(LogLevel.info, '🔔 Подписались на уведомления от "${characteristic.uuid}"${attempt > 1 ? ' (попытка $attempt/$maxRetries)' : ''}',
+          additionalData: {
+            ...charInfo,
+            'operation': 'subscribe',
+            'subscription_success': true,
+            'attempt': attempt,
+          });
+        
+        return; // Успешно подписались
+      } catch (e) {
+        final errorString = e.toString();
+        
+        // Проверяем, является ли ошибка временной (требует повторной попытки)
+        final isRetryableError = errorString.contains('ERROR_GATT_WRITE_REQUEST_BUSY') ||
+            errorString.contains('gatt.writeDescriptor() returned') ||
+            errorString.contains('setNotifyValue') ||
+            errorString.contains('BUSY') ||
+            errorString.contains('timeout');
+        
+        if (!isRetryableError || attempt == maxRetries) {
+          // Если ошибка не позволяет повторить или это последняя попытка
+          String errorMessage = 'Ошибка подписки на ${characteristic.uuid}';
+          if (errorString.contains('ERROR_GATT_WRITE_REQUEST_BUSY')) {
+            errorMessage = 'Ошибка подписки на ${characteristic.uuid}: GATT занят (попробуйте позже)';
+          } else if (errorString.contains('gatt.writeDescriptor() returned')) {
+            errorMessage = 'Ошибка подписки на ${characteristic.uuid}: дескриптор не записан';
+          } else if (errorString.contains('setNotifyValue')) {
+            errorMessage = 'Ошибка подписки на ${characteristic.uuid}: не удалось установить уведомления';
+          } else if (errorString.contains('timeout')) {
+            errorMessage = 'Ошибка подписки на ${characteristic.uuid}: превышено время ожидания';
+          }
+          
+          _addLog(LogLevel.error, '$errorMessage${attempt > 1 ? ' (попытка $attempt/$maxRetries)' : ''}: $e',
+            additionalData: {
+              ...charInfo,
+              'operation': 'subscribe_retry',
+              'attempt': attempt,
+              'max_retries': maxRetries,
+              'error': errorString,
+              'subscription_success': false,
+            });
+          
+          if (attempt == maxRetries) {
+            rethrow; // Последняя попытка не удалась
+          }
+        } else {
+          // Логируем предупреждение о повторной попытке
+          _addLog(LogLevel.warning, '⚠️ Повторная попытка подписки на ${characteristic.uuid} (попытка $attempt/$maxRetries): $e',
+            additionalData: {
+              ...charInfo,
+              'operation': 'subscribe_retry',
+              'attempt': attempt,
+              'max_retries': maxRetries,
+              'error': errorString,
+            });
+          
+          // Увеличиваем задержку с каждой попыткой (exponential backoff)
+          final delay = Duration(milliseconds: initialDelay.inMilliseconds * attempt);
+          await Future.delayed(delay);
+        }
+      }
+    }
+  }
+
+  /// Читает имя устройства из Device Information Service через GATT
+  /// Возвращает null, если имя не удалось прочитать
+  Future<String?> _readDeviceNameFromGATT(BluetoothDevice device, List<BluetoothService> services) async {
+    try {
+      // Device Information Service UUID: 0x180A
+      // Device Name Characteristic UUID: 0x2A00
+      const deviceInfoServiceUuid = '0000180a-0000-1000-8000-00805f9b34fb';
+      const deviceNameCharacteristicUuid = '00002a00-0000-1000-8000-00805f9b34fb';
+      
+      // Ищем Device Information Service
+      final deviceInfoService = services.firstWhere(
+        (service) => service.uuid.toString().toLowerCase() == deviceInfoServiceUuid,
+        orElse: () => throw Exception('Device Information Service not found'),
+      );
+      
+      // Ищем характеристику Device Name
+      final deviceNameCharacteristic = deviceInfoService.characteristics.firstWhere(
+        (char) => char.uuid.toString().toLowerCase() == deviceNameCharacteristicUuid,
+        orElse: () => throw Exception('Device Name characteristic not found'),
+      );
+      
+      // Проверяем, поддерживает ли характеристика чтение
+      if (!deviceNameCharacteristic.properties.read) {
+        _addLog(LogLevel.warning, '⚠️ Device Name characteristic не поддерживает чтение');
+        return null;
+      }
+      
+      // Читаем имя устройства
+      final nameBytes = await deviceNameCharacteristic.read();
+      if (nameBytes.isEmpty) {
+        _addLog(LogLevel.warning, '⚠️ Device Name characteristic пуста');
+        return null;
+      }
+      
+      // Декодируем имя устройства
+      // Пробуем UTF-8 декодирование
+      String deviceName;
+      try {
+        deviceName = utf8.decode(nameBytes, allowMalformed: true).trim();
+      } catch (e) {
+        // Если UTF-8 не работает, пробуем ASCII
+        deviceName = String.fromCharCodes(nameBytes.where((b) => b >= 32 && b <= 126)).trim();
+      }
+      
+      if (deviceName.isEmpty) {
+        _addLog(LogLevel.warning, '⚠️ Не удалось декодировать имя устройства');
+        return null;
+      }
+      
+      _addLog(LogLevel.info, '✅ Прочитано имя устройства из GATT: "$deviceName"');
+      return deviceName;
+      
+    } catch (e) {
+      // Не логируем ошибку, так как не все устройства имеют Device Information Service
+      return null;
+    }
   }
 
   /// Определяет, является ли новое имя устройства лучше существующего

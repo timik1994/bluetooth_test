@@ -3,12 +3,14 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../bloc/bluetooth_bloc.dart';
 import '../bloc/bluetooth_state.dart';
 import '../theme/theme_toggle_notification.dart';
+import '../theme/navigate_to_emulation_notification.dart';
 import '../components/notification.dart';
 import '../widgets/style_selector.dart';
 import '../widgets/custom_app_bar.dart';
 import '../widgets/custom_bottom_nav.dart';
 import 'permissions_screen.dart';
 import 'devices_screen.dart';
+import 'emulation_screen.dart';
 import 'logs_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -24,6 +26,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Widget> _screens = [
     const PermissionsScreen(),
     const DevicesScreen(),
+    const EmulationScreen(),
     const LogsScreen(),
   ];
 
@@ -52,7 +55,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: BlocListener<BluetoothBloc, BluetoothState>(
+      body: NotificationListener<NavigateToEmulationNotification>(
+        onNotification: (_) {
+          setState(() {
+            _currentIndex = 2; // Индекс вкладки эмуляции
+          });
+          return true;
+        },
+        child: BlocListener<BluetoothBloc, BluetoothState>(
         listener: (context, state) {
           if (state.errorMessage != null) {
             MyToastNotification().showErrorToast(context, state.errorMessage!);
@@ -65,6 +75,7 @@ class _HomeScreenState extends State<HomeScreen> {
           index: _currentIndex,
           children: _screens,
         ),
+      ),
       ),
       bottomNavigationBar: CustomBottomNavigationBar(
         currentIndex: _currentIndex,
@@ -82,6 +93,10 @@ class _HomeScreenState extends State<HomeScreen> {
           BottomNavigationBarItem(
             icon: Icon(Icons.bluetooth),
             label: 'Устройства',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.watch),
+            label: 'Эмуляция',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.list_alt),

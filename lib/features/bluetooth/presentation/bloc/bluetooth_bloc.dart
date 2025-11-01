@@ -9,6 +9,7 @@ import '../../domain/repositories/bluetooth_repository.dart';
 import '../../domain/entities/bluetooth_device_entity.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
 import '../../data/services/app_logger.dart';
+import '../../data/services/logs_storage_service.dart';
 import '../../../../core/usecases/usecase.dart';
 import 'bluetooth_event.dart';
 import 'bluetooth_state.dart';
@@ -21,6 +22,7 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
   final ClearBluetoothLogs clearBluetoothLogs;
   final BluetoothRepository bluetoothRepository;
   final AppLogger _appLogger = AppLogger();
+  final LogsStorageService _logsStorageService = LogsStorageService();
 
   StreamSubscription<List<BluetoothDeviceEntity>>? _devicesSubscription;
   StreamSubscription<BluetoothLogEntity>? _logsSubscription;
@@ -47,11 +49,41 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
 
     _initializeStreams();
     _initializeLogger();
+    // Загружаем сохраненные данные после инициализации блока
+    Future.microtask(() => _loadSavedData());
   }
 
   /// Инициализация логгера
   void _initializeLogger() {
     _appLogger.initialize(bluetoothBloc: this);
+  }
+
+  /// Загрузка сохраненных данных при инициализации
+  Future<void> _loadSavedData() async {
+    try {
+      // Загружаем логи из локального хранилища
+      final savedLogs = await _logsStorageService.loadLogs();
+      
+      // Загружаем ранее подключенные устройства
+      final savedDevices = await _logsStorageService.loadPreviouslyConnectedDevices();
+      
+      // Обновляем состояние только если есть данные для загрузки
+      if (savedLogs.isNotEmpty || savedDevices.isNotEmpty) {
+        emit(state.copyWith(
+          logs: savedLogs.isNotEmpty ? savedLogs : state.logs,
+          previouslyConnectedDevices: savedDevices.isNotEmpty ? savedDevices : state.previouslyConnectedDevices,
+        ));
+        
+        if (savedLogs.isNotEmpty) {
+          print('BluetoothBloc: Загружено ${savedLogs.length} сохраненных логов');
+        }
+        if (savedDevices.isNotEmpty) {
+          print('BluetoothBloc: Загружено ${savedDevices.length} ранее подключенных устройств');
+        }
+      }
+    } catch (e) {
+      print('BluetoothBloc: Ошибка загрузки сохраненных данных: $e');
+    }
   }
 
   void _initializeStreams() {
@@ -78,6 +110,8 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
           if (!isClosed) {
             final updatedLogs = List<BluetoothLogEntity>.from(state.logs)..add(log);
             emit(state.copyWith(logs: updatedLogs));
+            // Сохраняем логи локально
+            _logsStorageService.saveLogs(updatedLogs);
           }
         },
         onError: (error) {
@@ -125,19 +159,19 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
     try {
       emit(state.copyWith(isLoading: true, errorMessage: null));
       await _appLogger.logScanning('Запуск сканирования Bluetooth устройств', additionalData: {
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
         'scanType': 'discovery',
       });
       await startBluetoothScan(NoParams());
       emit(state.copyWith(isLoading: false, successMessage: 'Сканирование начато'));
       await _appLogger.logScanning('Сканирование успешно запущено', additionalData: {
         'status': 'started',
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
       });
     } catch (e) {
       await _appLogger.logError('Ошибка начала сканирования: $e', context: 'StartScan', additionalData: {
         'error': e.toString(),
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
       });
       emit(state.copyWith(
         isLoading: false,
@@ -151,19 +185,19 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
       final discoveredCount = state.discoveredDevices.length;
       await _appLogger.logScanning('Остановка сканирования Bluetooth устройств', additionalData: {
         'discoveredDevices': discoveredCount,
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
       });
       await stopBluetoothScan(NoParams());
       emit(state.copyWith(successMessage: 'Сканирование остановлено'));
       await _appLogger.logScanning('Сканирование успешно остановлено', additionalData: {
         'status': 'stopped',
         'totalDiscovered': discoveredCount,
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
       });
     } catch (e) {
       await _appLogger.logError('Ошибка остановки сканирования: $e', context: 'StopScan', additionalData: {
         'error': e.toString(),
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
       });
       emit(state.copyWith(errorMessage: 'Ошибка остановки сканирования: $e'));
     }
@@ -190,7 +224,7 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
         'rssi': device.rssi,
         'serviceUuids': device.serviceUuids,
         'isConnectable': device.isConnectable,
-        'timestamp': DateTime.now().toIso8601String(),
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
       });
       
       // Добавляем устройство в список подключающихся
@@ -215,7 +249,7 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
           'rssi': device.rssi,
           'serviceUuids': device.serviceUuids,
           'isConnectable': device.isConnectable,
-          'timestamp': DateTime.now().toIso8601String(),
+          'timestamp': AppLogger.formatTimestamp(DateTime.now()),
         });
         
         // Добавляем устройство в список подключенных и ранее подключенных
@@ -230,6 +264,8 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
           previouslyConnectedDevices: updatedPreviouslyConnectedDevices,
           successMessage: 'Успешно подключено к устройству',
         ));
+        // Сохраняем обновленный список ранее подключенных устройств
+        _logsStorageService.savePreviouslyConnectedDevices(updatedPreviouslyConnectedDevices);
       } else {
         await _appLogger.logError('Не удалось подключиться к устройству ${device.name}', context: 'ConnectToDevice', deviceId: event.deviceId, deviceName: device.name);
         emit(state.copyWith(
@@ -281,6 +317,8 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
           previouslyConnectedDevices: updatedPreviouslyConnectedDevices,
           successMessage: 'Успешно переподключено к устройству',
         ));
+        // Сохраняем обновленный список ранее подключенных устройств
+        _logsStorageService.savePreviouslyConnectedDevices(updatedPreviouslyConnectedDevices);
       } else {
         emit(state.copyWith(
           connectingDevices: finalConnectingDevices,
@@ -321,6 +359,8 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
   Future<void> _onClearLogs(ClearLogsEvent event, Emitter<BluetoothState> emit) async {
     try {
       await clearBluetoothLogs(NoParams());
+      // Очищаем логи из локального хранилища
+      await _logsStorageService.clearLogs();
       emit(state.copyWith(
         logs: [],
         successMessage: 'Логи очищены',
@@ -346,14 +386,45 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
   void _onAddLog(AddLogEvent event, Emitter<BluetoothState> emit) {
     final updatedLogs = List<BluetoothLogEntity>.from(state.logs)..add(event.logEntity);
     emit(state.copyWith(logs: updatedLogs));
+    
+    // Записываем лог в файл с полной детализацией
+    // Это нужно для логов, которые добавляются напрямую через AddLogEvent (например, из EmulationLogger)
+    // Логи, созданные через AppLogger.log(), уже записаны в файл, но logFromEntity проверяет ID
+    // и не будет дублировать уже записанные логи
+    _appLogger.logFromEntity(event.logEntity);
+    
+    // Сохраняем логи локально
+    _logsStorageService.saveLogs(updatedLogs);
   }
 
   @override
   Future<void> close() {
+    // Сохраняем данные перед закрытием
+    _saveDataBeforeClose();
+    
     _devicesSubscription?.cancel();
     _logsSubscription?.cancel();
     _scanningSubscription?.cancel();
     _bluetoothEnabledSubscription?.cancel();
     return super.close();
+  }
+
+  /// Сохранение данных перед закрытием блока
+  void _saveDataBeforeClose() {
+    try {
+      // Сохраняем текущие логи
+      if (state.logs.isNotEmpty) {
+        _logsStorageService.saveLogs(state.logs);
+      }
+      
+      // Сохраняем ранее подключенные устройства
+      if (state.previouslyConnectedDevices.isNotEmpty) {
+        _logsStorageService.savePreviouslyConnectedDevices(state.previouslyConnectedDevices);
+      }
+      
+      print('BluetoothBloc: Данные сохранены перед закрытием');
+    } catch (e) {
+      print('BluetoothBloc: Ошибка сохранения данных перед закрытием: $e');
+    }
   }
 }

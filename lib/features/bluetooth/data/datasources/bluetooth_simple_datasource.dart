@@ -42,6 +42,7 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
 
   BluetoothSimpleDataSourceImpl() {
     _initializeAppLogger();
+    _initializeBluetooth(); // Инициализируем сразу при создании
   }
 
   void _initializeAppLogger() async {
@@ -52,12 +53,24 @@ class BluetoothSimpleDataSourceImpl implements BluetoothSimpleDataSource {
     if (_isInitialized) return;
     _isInitialized = true;
 
+    // Слушаем изменения состояния Bluetooth
     FlutterBluePlus.adapterState.listen((state) {
-      _isBluetoothEnabledController.add(state == BluetoothAdapterState.on);
+      final isEnabled = state == BluetoothAdapterState.on;
+      _isBluetoothEnabledController.add(isEnabled);
+      _addLog(LogLevel.info, 'Bluetooth состояние изменилось: ${isEnabled ? "Включен" : "Выключен"}');
     });
 
+    // Слушаем изменения состояния сканирования
     FlutterBluePlus.isScanning.listen((scanning) {
       _isScanningController.add(scanning);
+    });
+    
+    // Получаем текущее состояние Bluetooth сразу
+    FlutterBluePlus.adapterState.first.then((state) {
+      final isEnabled = state == BluetoothAdapterState.on;
+      _isBluetoothEnabledController.add(isEnabled);
+    }).catchError((e) {
+      _addLog(LogLevel.error, 'Ошибка получения начального состояния Bluetooth: $e');
     });
   }
 

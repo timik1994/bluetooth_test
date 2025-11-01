@@ -48,6 +48,9 @@ class BlePeripheralService {
   Timer? _heartRateTimer;
   int _currentHeartRate = 75;
   int _currentBatteryLevel = 85;
+  
+  // Храним информацию о последнем подключенном устройстве
+  Map<String, dynamic>? _lastConnectedDevice;
 
   // Потоки для уведомлений о изменениях
   final StreamController<int> _heartRateController = StreamController<int>.broadcast();
@@ -67,6 +70,7 @@ class BlePeripheralService {
   bool get isAdvertising => _isAdvertising;
   int get currentHeartRate => _currentHeartRate;
   int get currentBatteryLevel => _currentBatteryLevel;
+  Map<String, dynamic>? get lastConnectedDevice => _lastConnectedDevice;
 
   /// Настройка обработчиков событий от Android
   void _setupChannelHandlers() {
@@ -95,6 +99,9 @@ class BlePeripheralService {
             data,
           );
           
+          // Сохраняем информацию о подключенном устройстве
+          _lastConnectedDevice = data;
+          
           _deviceConnectedController.add(data);
           print('BLE Service: Данные добавлены в поток');
           print('BLE Service: Количество слушателей: ${_deviceConnectedController.hasListener}');
@@ -107,6 +114,12 @@ class BlePeripheralService {
           
           // Логирование отключения
           _logger.logDeviceDisconnected(address);
+          
+          // Очищаем информацию о подключенном устройстве при отключении
+          if (_lastConnectedDevice != null && 
+              _lastConnectedDevice!['deviceAddress'] == address) {
+            _lastConnectedDevice = null;
+          }
           
           _deviceDisconnectedController.add(address);
           break;

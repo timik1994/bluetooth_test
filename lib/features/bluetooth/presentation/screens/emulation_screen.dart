@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as ble;
-import 'package:permission_handler/permission_handler.dart';
 import 'dart:async';
 import 'dart:math';
 import '../bloc/bluetooth_bloc.dart';
@@ -9,6 +8,7 @@ import '../bloc/bluetooth_state.dart' as app_state;
 import '../../data/services/ble_peripheral_service.dart';
 import '../widgets/treadmill_data_modal.dart';
 import '../components/notification.dart';
+import '../theme/navigate_to_emulation_notification.dart';
 
 class EmulationScreen extends StatefulWidget {
   const EmulationScreen({super.key});
@@ -17,7 +17,7 @@ class EmulationScreen extends StatefulWidget {
   State<EmulationScreen> createState() => _EmulationScreenState();
 }
 
-class _EmulationScreenState extends State<EmulationScreen> {
+class _EmulationScreenState extends State<EmulationScreen> with WidgetsBindingObserver {
   bool _isEmulating = false;
   int _heartRate = 75;
   int _batteryLevel = 85;
@@ -29,24 +29,89 @@ class _EmulationScreenState extends State<EmulationScreen> {
   StreamSubscription? _deviceConnectedSubscription;
   StreamSubscription? _dataReceivedSubscription;
   bool _isDataModalOpen = false; // Флаг, чтобы не открывать модалку повторно
+  bool _hasShownModalOnReturn = false; // Флаг для показа модалки при возврате
+  bool _isDeviceConnected = false; // Флаг подключения устройства
+  String? _connectedDeviceName; // Имя подключенного устройства
+  String? _connectedDeviceAddress; // Адрес подключенного устройства
 
   @override
   void dispose() {
-    _stopEmulation();
+    WidgetsBinding.instance.removeObserver(this);
+    // Не останавливаем эмуляцию при dispose - она должна продолжаться при навигации назад
+    // Останавливаем только подписки и таймер UI, но не саму BLE рекламацию
+    _stopHeartRateSimulation(); // Останавливаем таймер UI, но BLE сервис продолжит работать
     _heartRateSubscription?.cancel();
     _batterySubscription?.cancel();
     _connectionSubscription?.cancel();
     _deviceConnectedSubscription?.cancel();
     _dataReceivedSubscription?.cancel();
-    _bleService.dispose();
+    // Не вызываем _bleService.dispose() - сервис синглтон и должен продолжать работать
     super.dispose();
   }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Восстанавливаем состояние эмуляции, если она уже запущена
+    _isEmulating = _bleService.isAdvertising;
+    if (_isEmulating) {
+      // Если эмуляция активна, восстанавливаем значения из сервиса
+      _heartRate = _bleService.currentHeartRate;
+      _batteryLevel = _bleService.currentBatteryLevel;
+      
+      // Проверяем состояние подключения устройства
+      final connectedDevice = _bleService.lastConnectedDevice;
+      if (connectedDevice != null) {
+        final isConnected = connectedDevice['isConnected'] as bool? ?? false;
+        if (isConnected) {
+          _isDeviceConnected = true;
+          _connectedDeviceName = connectedDevice['deviceName'] as String?;
+          _connectedDeviceAddress = connectedDevice['deviceAddress'] as String?;
+        }
+      }
+      
+      // Перезапускаем симуляцию пульса для UI, если эмуляция активна
+      // (таймер был остановлен в dispose при предыдущем закрытии экрана)
+      _startHeartRateSimulation();
+      
+      // Проверяем, есть ли подключенное устройство при возврате на экран
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _checkAndShowModalOnReturn();
+      });
+    }
     _setupBleServiceListeners();
     _setupBluetoothBloc();
+  }
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // При возврате приложения в активное состояние проверяем подключенное устройство
+    if (state == AppLifecycleState.resumed && _isEmulating && mounted) {
+      _checkAndShowModalOnReturn();
+    }
+  }
+  
+  void _checkAndShowModalOnReturn() {
+    if (_isEmulating && !_isDataModalOpen && !_hasShownModalOnReturn) {
+      final connectedDevice = _bleService.lastConnectedDevice;
+      if (connectedDevice != null) {
+        final deviceName = connectedDevice['deviceName'] as String? ?? 'Неизвестное устройство';
+        final deviceAddress = connectedDevice['deviceAddress'] as String? ?? 'Неизвестный адрес';
+        final isConnected = connectedDevice['isConnected'] as bool? ?? false;
+        
+        if (isConnected) {
+          _hasShownModalOnReturn = true;
+          // Небольшая задержка для стабильности UI
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (mounted && !_isDataModalOpen) {
+              _openTreadmillDataModal(deviceName, deviceAddress);
+            }
+          });
+        }
+      }
+    }
   }
 
   void _setupBluetoothBloc() {
@@ -77,8 +142,45 @@ class _EmulationScreenState extends State<EmulationScreen> {
     // Слушаем изменения состояния подключения (только реальные подключения)
     _connectionSubscription = _bleService.connectionStream.listen((isConnected) {
       if (mounted) {
-        // Показываем уведомление только при реальных подключениях/отключениях
-        MyToastNotification().showInfoToast(context, isConnected ? 'Устройство подключилось к эмулятору!' : 'Устройство отключилось');
+        setState(() {
+          _isDeviceConnected = isConnected;
+          if (isConnected) {
+            final connectedDevice = _bleService.lastConnectedDevice;
+            if (connectedDevice != null) {
+              _connectedDeviceName = connectedDevice['deviceName'] as String?;
+              _connectedDeviceAddress = connectedDevice['deviceAddress'] as String?;
+            }
+          } else {
+            _connectedDeviceName = null;
+            _connectedDeviceAddress = null;
+          }
+        });
+        
+        if (isConnected) {
+          // Показываем уведомление с возможностью перехода на экран эмуляции
+          // Это уведомление будет показываться на любом экране приложения
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('🎉 Устройство подключилось к эмулятору!'),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 5),
+                  action: SnackBarAction(
+                    label: 'Открыть эмуляцию',
+                    textColor: Colors.white,
+                    onPressed: () {
+                      NavigateToEmulationNotification().dispatch(context);
+                    },
+                  ),
+                ),
+              );
+            }
+          });
+        } else {
+          // При отключении показываем простое уведомление
+          MyToastNotification().showInfoToast(context, 'Устройство отключилось');
+        }
       }
     });
 
@@ -94,11 +196,22 @@ class _EmulationScreenState extends State<EmulationScreen> {
       print('EmulationScreen: Ключи: ${deviceData.keys.toList()}');
       print('EmulationScreen: Widget mounted: $mounted');
       
-      if (mounted) {
+        if (mounted) {
         final deviceName = deviceData['deviceName'] as String? ?? 'Неизвестное устройство';
         final deviceAddress = deviceData['deviceAddress'] as String? ?? 'Неизвестный адрес';
         final bondState = deviceData['bondState'] as int? ?? 0;
         final isConnected = deviceData['isConnected'] as bool? ?? false;
+        
+        setState(() {
+          _isDeviceConnected = isConnected;
+          if (isConnected) {
+            _connectedDeviceName = deviceName;
+            _connectedDeviceAddress = deviceAddress;
+          } else {
+            _connectedDeviceName = null;
+            _connectedDeviceAddress = null;
+          }
+        });
         
         print('EmulationScreen: ===== ОБРАБОТКА ПОДКЛЮЧЕНИЯ =====');
         print('EmulationScreen: Имя: $deviceName');
@@ -119,12 +232,23 @@ class _EmulationScreenState extends State<EmulationScreen> {
             ),
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 6),
+            action: SnackBarAction(
+              label: 'Открыть',
+              textColor: Colors.white,
+              onPressed: () {
+                // Навигация уже на экране эмуляции, но можно показать модалку
+                if (!_isDataModalOpen) {
+                  _openTreadmillDataModal(deviceName, deviceAddress);
+                }
+              },
+            ),
           ),
         );
         
         // Открываем модалку сразу при подключении (один раз)
         if (!_isDataModalOpen) {
           print('EmulationScreen: Открываем модальное окно данных для $deviceName');
+          _hasShownModalOnReturn = true; // Помечаем, что модалка уже показана
           _openTreadmillDataModal(deviceName, deviceAddress);
         }
       }
@@ -146,13 +270,19 @@ class _EmulationScreenState extends State<EmulationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Эмуляция часов'),
-        backgroundColor: Colors.green.shade700,
-        foregroundColor: Colors.white,
-      ),
-      body: BlocBuilder<BluetoothBloc, app_state.BluetoothState>(
+    return PopScope(
+      canPop: !_isEmulating, // Не позволяем выйти, если эмуляция запущена
+      onPopInvoked: (didPop) {
+        if (_isEmulating && !didPop) {
+          // Показываем уведомление, что эмуляция запущена
+          MyToastNotification().showWarningToast(
+            context, 
+            'Эмуляция запущена!\nДля остановки используйте кнопку "Остановить эмуляцию"',
+            duration: const Duration(seconds: 4),
+          );
+        }
+      },
+      child: BlocBuilder<BluetoothBloc, app_state.BluetoothState>(
         builder: (context, state) {
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16.0),
@@ -318,6 +448,40 @@ class _EmulationScreenState extends State<EmulationScreen> {
                     ),
                   ),
                 ),
+                
+                const SizedBox(height: 16),
+                
+                // Кнопка просмотра данных устройства
+                if (_isEmulating)
+                  SizedBox(
+                    height: 50,
+                    child: ElevatedButton.icon(
+                      onPressed: _isDeviceConnected && _connectedDeviceName != null && _connectedDeviceAddress != null
+                          ? () {
+                              _openTreadmillDataModal(
+                                _connectedDeviceName!,
+                                _connectedDeviceAddress!,
+                              );
+                            }
+                          : null,
+                      icon: Icon(_isDeviceConnected ? Icons.data_usage : Icons.bluetooth_disabled),
+                      label: Text(
+                        _isDeviceConnected
+                            ? 'Просмотр данных от устройства'
+                            : 'Ожидание подключения устройства',
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _isDeviceConnected ? Colors.blue : Colors.grey,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: Colors.grey.shade300,
+                        disabledForegroundColor: Colors.grey.shade600,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
                 
                 const SizedBox(height: 24),
                 
@@ -519,6 +683,10 @@ class _EmulationScreenState extends State<EmulationScreen> {
       
       setState(() {
         _isEmulating = false;
+        _hasShownModalOnReturn = false; // Сбрасываем флаг при остановке
+        _isDeviceConnected = false;
+        _connectedDeviceName = null;
+        _connectedDeviceAddress = null;
       });
       if(mounted) {
       MyToastNotification().showSuccessToast(context, 'Эмуляция остановлена!');
@@ -531,6 +699,8 @@ class _EmulationScreenState extends State<EmulationScreen> {
   }
 
   void _startHeartRateSimulation() {
+    // Убеждаемся, что старый таймер остановлен перед созданием нового
+    _stopHeartRateSimulation();
     _heartRateTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (mounted && _bleService.isAdvertising) {
         // Имитируем естественные колебания пульса
@@ -556,6 +726,7 @@ class _EmulationScreenState extends State<EmulationScreen> {
   void _openTreadmillDataModal(String deviceName, String deviceAddress) {
     if (_isDataModalOpen) return;
     _isDataModalOpen = true;
+    _hasShownModalOnReturn = true; // Помечаем, что модалка показана
     showDialog(
       context: context,
       barrierDismissible: false, // Нельзя закрыть случайно
@@ -566,6 +737,7 @@ class _EmulationScreenState extends State<EmulationScreen> {
     ).whenComplete(() {
       // Сбрасываем флаг, когда модалка закрыта
       _isDataModalOpen = false;
+      // Не сбрасываем _hasShownModalOnReturn здесь, чтобы модалка не показывалась повторно при возврате
     });
   }
 

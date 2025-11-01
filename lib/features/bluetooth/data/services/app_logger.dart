@@ -11,6 +11,17 @@ class AppLogger {
   File? _logFile;
   bool _isInitialized = false;
   BluetoothBloc? _bluetoothBloc;
+  final Set<String> _loggedIds = {}; // Для отслеживания уже записанных логов
+
+  /// Форматирование таймштампа для имени файла (безопасный формат без пробелов и двоеточий)
+  String _formatTimestampForFilename(DateTime timestamp) {
+    return '${timestamp.day.toString().padLeft(2, '0')}.'
+        '${timestamp.month.toString().padLeft(2, '0')}.'
+        '${timestamp.year}_'
+        '${timestamp.hour.toString().padLeft(2, '0')}-'
+        '${timestamp.minute.toString().padLeft(2, '0')}-'
+        '${timestamp.second.toString().padLeft(2, '0')}';
+  }
 
   /// Инициализация логгера
   Future<void> initialize({BluetoothBloc? bluetoothBloc}) async {
@@ -26,7 +37,7 @@ class AppLogger {
         await logDir.create(recursive: true);
       }
       
-      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final timestamp = _formatTimestampForFilename(DateTime.now());
       _logFile = File('${logDir.path}/bluetooth_app_$timestamp.log');
       
       await _logFile!.writeAsString('=== ЛОГИ BLUETOOTH ПРИЛОЖЕНИЯ ===\n');
@@ -51,9 +62,9 @@ class AppLogger {
   }
 
   /// Добавление лога в систему приложения
-  void _addToAppLogs(String message, LogLevel level, {String? deviceId, String? deviceName, Map<String, dynamic>? additionalData}) {
+  void _addToAppLogs(String message, LogLevel level, {String? deviceId, String? deviceName, Map<String, dynamic>? additionalData, BluetoothLogEntity? existingEntity}) {
     if (_bluetoothBloc != null) {
-      final logEntity = BluetoothLogEntity(
+      final logEntity = existingEntity ?? BluetoothLogEntity(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         timestamp: DateTime.now(),
         level: level,
@@ -73,20 +84,23 @@ class AppLogger {
       await initialize();
     }
     
-    if (_logFile == null) return;
+    // Создаем полный лог-entity для записи в файл с детализацией
+    final logLevel = _convertStringToLogLevel(level);
+    final logEntity = BluetoothLogEntity(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      timestamp: DateTime.now(),
+      level: logLevel,
+      message: message,
+      deviceId: deviceId,
+      deviceName: deviceName,
+      additionalData: additionalData,
+    );
     
-    try {
-      final timestamp = DateTime.now().toIso8601String();
-      final logEntry = '[$timestamp] [$level] $message\n';
-      await _logFile!.writeAsString(logEntry, mode: FileMode.append);
-      print('AppLogger: $message');
-      
-      // Добавляем в систему логов приложения
-      final logLevel = _convertStringToLogLevel(level);
-      _addToAppLogs(message, logLevel, deviceId: deviceId, deviceName: deviceName, additionalData: additionalData);
-    } catch (e) {
-      print('AppLogger: Ошибка записи лога: $e');
-    }
+    // Записываем в файл с полной детализацией
+    await logFromEntity(logEntity);
+    
+    // Добавляем в систему логов приложения, передавая существующий entity (чтобы не дублировать запись в файл)
+    _addToAppLogs(message, logLevel, deviceId: deviceId, deviceName: deviceName, additionalData: additionalData, existingEntity: logEntity);
   }
 
   /// Конвертация строкового уровня в LogLevel
@@ -100,6 +114,145 @@ class AppLogger {
         return LogLevel.debug;
       default:
         return LogLevel.info;
+    }
+  }
+
+  /// Форматирование таймштампа в формат DD.MM.YYYY HH:MM:SS
+  String _formatTimestamp(DateTime timestamp) {
+    return '${timestamp.day.toString().padLeft(2, '0')}.'
+        '${timestamp.month.toString().padLeft(2, '0')}.'
+        '${timestamp.year} '
+        '${timestamp.hour.toString().padLeft(2, '0')}:'
+        '${timestamp.minute.toString().padLeft(2, '0')}:'
+        '${timestamp.second.toString().padLeft(2, '0')}';
+  }
+
+  /// Статический метод для форматирования timestamp (для использования в других классах)
+  static String formatTimestamp(DateTime timestamp) {
+    return '${timestamp.day.toString().padLeft(2, '0')}.'
+        '${timestamp.month.toString().padLeft(2, '0')}.'
+        '${timestamp.year} '
+        '${timestamp.hour.toString().padLeft(2, '0')}:'
+        '${timestamp.minute.toString().padLeft(2, '0')}:'
+        '${timestamp.second.toString().padLeft(2, '0')}';
+  }
+
+  /// Конвертация LogLevel в строку
+  String _convertLogLevelToString(LogLevel level) {
+    switch (level) {
+      case LogLevel.error:
+        return 'ERROR';
+      case LogLevel.warning:
+        return 'WARNING';
+      case LogLevel.debug:
+        return 'DEBUG';
+      default:
+        return 'INFO';
+    }
+  }
+
+  /// Запись лога из BluetoothLogEntity в файл с полной детализацией
+  Future<void> logFromEntity(BluetoothLogEntity logEntity) async {
+    // Проверяем, не был ли уже записан этот лог
+    if (_loggedIds.contains(logEntity.id)) {
+      return; // Лог уже был записан
+    }
+    
+    if (!_isInitialized) {
+      await initialize();
+    }
+    
+    if (_logFile == null) return;
+    
+    try {
+      final timestamp = _formatTimestamp(logEntity.timestamp);
+      final level = _convertLogLevelToString(logEntity.level);
+      
+      // Формируем базовую строку лога
+      final buffer = StringBuffer();
+      buffer.writeln('[$timestamp] [$level] ${logEntity.message}');
+      
+      // Добавляем информацию об устройстве
+      if (logEntity.deviceName != null || logEntity.deviceId != null) {
+        buffer.writeln('  Устройство: ${logEntity.deviceName ?? 'Неизвестно'} (${logEntity.deviceId ?? 'Неизвестный адрес'})');
+      }
+      
+      // Добавляем дополнительные данные, если они есть
+      if (logEntity.additionalData != null && logEntity.additionalData!.isNotEmpty) {
+        buffer.writeln('  Дополнительные данные:');
+        try {
+          // Безопасно преобразуем Map в Map<String, dynamic>
+          // Используем явное приведение через as Map для обработки разных типов Map
+          final data = logEntity.additionalData! as Map;
+          final safeData = _convertToSafeMap(data);
+          _formatAdditionalData(buffer, safeData, indent: '    ');
+        } catch (e) {
+          // Если произошла ошибка при форматировании, выводим как строку
+          buffer.writeln('    Ошибка форматирования данных: $e');
+          buffer.writeln('    Данные: ${logEntity.additionalData}');
+        }
+      }
+      
+      buffer.writeln(); // Пустая строка для разделения
+      
+      await _logFile!.writeAsString(buffer.toString(), mode: FileMode.append);
+      
+      // Помечаем лог как записанный
+      _loggedIds.add(logEntity.id);
+      
+      // Очищаем старые ID (оставляем только последние 1000 для экономии памяти)
+      if (_loggedIds.length > 1000) {
+        final idsToRemove = _loggedIds.take(_loggedIds.length - 1000).toList();
+        _loggedIds.removeAll(idsToRemove);
+      }
+    } catch (e) {
+      print('AppLogger: Ошибка записи лога из entity: $e');
+    }
+  }
+
+  /// Безопасное преобразование Map в Map<String, dynamic>
+  Map<String, dynamic> _convertToSafeMap(Map map) {
+    return Map<String, dynamic>.from(
+      map.map((key, value) => MapEntry(key.toString(), _convertValue(value)))
+    );
+  }
+
+  /// Преобразование значения (рекурсивно для вложенных структур)
+  dynamic _convertValue(dynamic value) {
+    if (value is Map) {
+      return _convertToSafeMap(value);
+    } else if (value is List) {
+      return value.map((item) => _convertValue(item)).toList();
+    } else {
+      return value;
+    }
+  }
+
+  /// Форматирование дополнительных данных для файла
+  void _formatAdditionalData(StringBuffer buffer, Map<String, dynamic> data, {String indent = ''}) {
+    for (final entry in data.entries) {
+      final key = entry.key;
+      final value = entry.value;
+      
+      if (value is Map) {
+        buffer.writeln('$indent$key:');
+        // Данные уже преобразованы в Map<String, dynamic> в _convertToSafeMap
+        _formatAdditionalData(buffer, Map<String, dynamic>.from(value), indent: '$indent  ');
+      } else if (value is List) {
+        buffer.writeln('$indent$key:');
+        for (int i = 0; i < value.length; i++) {
+          final item = value[i];
+          if (item is Map) {
+            buffer.writeln('$indent  [$i]:');
+            // Данные уже преобразованы в Map<String, dynamic> в _convertToSafeMap
+            _formatAdditionalData(buffer, Map<String, dynamic>.from(item), indent: '$indent    ');
+          } else {
+            buffer.writeln('$indent  [$i]: $item');
+          }
+        }
+      } else {
+        buffer.writeln('$indent$key: $value');
+      }
     }
   }
 

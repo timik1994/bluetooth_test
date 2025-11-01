@@ -46,19 +46,55 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
 
       final currentStatuses = await PermissionHelper.getAllPermissionStatuses();
       
+      // Запрашиваем основные разрешения
       final results = await PermissionHelper.requestRequiredPermissions();
       
       for (final entry in results.entries) {
         currentStatuses[entry.key] = entry.value;
       }
 
+      // Запрашиваем опциональные разрешения с правильной обработкой
       try {
-        final optionalResults = await PermissionHelper.requestOptionalPermissions();
-        for (final entry in optionalResults.entries) {
-          currentStatuses[entry.key] = entry.value;
+        // Проверяем статус Location перед запросом Location Always
+        final locationStatus = await Permission.location.status;
+        
+        // Location Always требует сначала Location, затем переход в настройки
+        if (locationStatus.isGranted) {
+          final locationAlwaysStatus = await Permission.locationAlways.status;
+          if (locationAlwaysStatus.isDenied || locationAlwaysStatus.isPermanentlyDenied) {
+            // Пытаемся запросить Location Always
+            final locationAlwaysResult = await Permission.locationAlways.request();
+            currentStatuses[Permission.locationAlways] = locationAlwaysResult;
+            
+            // Если запрос не удался, но статус не permanentlyDenied, можно предложить открыть настройки
+            if (locationAlwaysResult.isPermanentlyDenied) {
+              print('Location Always окончательно отклонено, требуется открыть настройки');
+            }
+          } else {
+            currentStatuses[Permission.locationAlways] = locationAlwaysStatus;
+          }
+        } else {
+          // Если Location не предоставлено, Location Always не может быть запрошено
+          currentStatuses[Permission.locationAlways] = await Permission.locationAlways.status;
+        }
+        
+        // Запрашиваем уведомления
+        final notificationStatus = await Permission.notification.status;
+        if (notificationStatus.isDenied) {
+          final notificationResult = await Permission.notification.request();
+          currentStatuses[Permission.notification] = notificationResult;
+        } else {
+          currentStatuses[Permission.notification] = notificationStatus;
         }
       } catch (e) {
         print('Ошибка запроса дополнительных разрешений: $e');
+        // Обновляем статусы даже при ошибке
+        try {
+          currentStatuses[Permission.locationAlways] = await Permission.locationAlways.status;
+          currentStatuses[Permission.notification] = await Permission.notification.status;
+        } catch (e2) {
+          print('Ошибка получения статусов опциональных разрешений: $e2');
+        }
       }
 
       if (mounted) {

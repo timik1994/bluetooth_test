@@ -17,6 +17,8 @@ android {
 
     kotlinOptions {
         jvmTarget = JavaVersion.VERSION_11.toString()
+        // Отключение инкрементальной компиляции для решения проблемы с путями на разных дисках
+        freeCompilerArgs = listOf("-Xno-param-assertions", "-Xjvm-default=all")
     }
 
     defaultConfig {
@@ -41,4 +43,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+// Отключение инкрементальной компиляции Kotlin для всех задач
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    incremental = false
 }

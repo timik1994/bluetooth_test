@@ -5,7 +5,6 @@ import '../bloc/bluetooth_event.dart';
 import '../bloc/bluetooth_state.dart';
 import '../widgets/device_item_widget.dart';
 import 'intercept_screen.dart';
-import 'emulation_screen.dart';
 
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
@@ -358,7 +357,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 ),
               ),
             ),
-            // Кнопка "Перехват" - рендерится третьей
+            // Кнопка "Перехват" - рендерится третьей (теперь самая верхняя)
             AnimatedPositioned(
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeInOut,
@@ -384,35 +383,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   backgroundColor: Colors.purple,
                   icon: const Icon(Icons.track_changes),
                   label: const Text('Перехват'),
-                ),
-              ),
-            ),
-            // Кнопка "Эмуляция" (самая верхняя) - рендерится последней (сверху)
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 350),
-              curve: Curves.easeInOut,
-              bottom: _fabExpanded ? 210 : -100, // Еще выше предыдущей кнопки
-              right: 0,
-              child: SizedBox(
-                width: 140,
-                child: FloatingActionButton.extended(
-                  heroTag: 'fab_emulation',
-                  onPressed: _fabExpanded ? () {
-                    setState(() {
-                      _fabExpanded = false;
-                    });
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => BlocProvider.value(
-                          value: context.read<BluetoothBloc>(),
-                          child: const EmulationScreen(),
-                        ),
-                      ),
-                    );
-                  } : null,
-                  backgroundColor: Colors.green,
-                  icon: const Icon(Icons.watch),
-                  label: const Text('Эмуляция'),
                 ),
               ),
             ),

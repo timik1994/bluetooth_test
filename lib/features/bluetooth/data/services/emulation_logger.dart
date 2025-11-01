@@ -2,6 +2,7 @@ import 'dart:io';
 import '../../presentation/bloc/bluetooth_bloc.dart';
 import '../../presentation/bloc/bluetooth_event.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
+import 'app_logger.dart';
 
 class EmulationLogger {
   static final EmulationLogger _instance = EmulationLogger._internal();
@@ -11,6 +12,16 @@ class EmulationLogger {
   File? _logFile;
   bool _isInitialized = false;
   BluetoothBloc? _bluetoothBloc;
+
+  /// Форматирование таймштампа для имени файла (безопасный формат без пробелов и двоеточий)
+  String _formatTimestampForFilename(DateTime timestamp) {
+    return '${timestamp.day.toString().padLeft(2, '0')}.'
+        '${timestamp.month.toString().padLeft(2, '0')}.'
+        '${timestamp.year}_'
+        '${timestamp.hour.toString().padLeft(2, '0')}-'
+        '${timestamp.minute.toString().padLeft(2, '0')}-'
+        '${timestamp.second.toString().padLeft(2, '0')}';
+  }
 
   /// Инициализация логгера
   Future<void> initialize({BluetoothBloc? bluetoothBloc}) async {
@@ -26,7 +37,7 @@ class EmulationLogger {
         await logDir.create(recursive: true);
       }
       
-      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final timestamp = _formatTimestampForFilename(DateTime.now());
       _logFile = File('${logDir.path}/emulation_$timestamp.log');
       
       await _logFile!.writeAsString('=== ЭМУЛЯЦИЯ BLE УСТРОЙСТВА ===\n');
@@ -71,7 +82,7 @@ class EmulationLogger {
     if (_logFile == null) return;
     
     try {
-      final timestamp = DateTime.now().toIso8601String();
+      final timestamp = AppLogger.formatTimestamp(DateTime.now());
       final logEntry = '[$timestamp] [$level] $message\n';
       await _logFile!.writeAsString(logEntry, mode: FileMode.append);
       print('EmulationLogger: $message');
@@ -203,7 +214,7 @@ class EmulationLogger {
       _addToAppLogs(
         'Эмуляция BLE устройства запущена${reason != null ? ': $reason' : ''}',
         LogLevel.info,
-        additionalData: {'reason': reason, 'timestamp': DateTime.now().toIso8601String()},
+        additionalData: {'reason': reason, 'timestamp': AppLogger.formatTimestamp(DateTime.now())},
       );
     } else {
       await log('=== ЭМУЛЯЦИЯ ОСТАНОВЛЕНА ===');
@@ -215,7 +226,7 @@ class EmulationLogger {
       _addToAppLogs(
         'Эмуляция BLE устройства остановлена${reason != null ? ': $reason' : ''}',
         LogLevel.warning,
-        additionalData: {'reason': reason, 'timestamp': DateTime.now().toIso8601String()},
+        additionalData: {'reason': reason, 'timestamp': AppLogger.formatTimestamp(DateTime.now())},
       );
     }
   }
