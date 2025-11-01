@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../domain/entities/bluetooth_device_entity.dart';
+import 'treadmill_data_modal.dart';
 
 class DeviceDetailsModal extends StatelessWidget {
   final BluetoothDeviceEntity device;
@@ -246,7 +247,32 @@ class DeviceDetailsModal extends StatelessWidget {
       Icons.settings_remote,
       [
         const SizedBox(height: 8),
-        if (device.isConnected)
+        if (device.isConnected) ...[
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(context).pop();
+                // Открываем модалку с данными и сервисами
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (dialogContext) => TreadmillDataModal(
+                    deviceName: device.name,
+                    deviceAddress: device.id,
+                  ),
+                );
+              },
+              icon: const Icon(Icons.analytics),
+              label: const Text('Данные и сервисы'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
@@ -262,7 +288,8 @@ class DeviceDetailsModal extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(vertical: 12),
               ),
             ),
-          )
+          ),
+        ]
         else if (isConnecting)
            SizedBox(
             width: double.infinity,

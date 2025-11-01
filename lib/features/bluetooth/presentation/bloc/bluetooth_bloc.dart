@@ -10,6 +10,7 @@ import '../../domain/entities/bluetooth_device_entity.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
 import '../../data/services/app_logger.dart';
 import '../../data/services/logs_storage_service.dart';
+import '../../data/services/native_bluetooth_connection_service.dart';
 import '../../../../core/usecases/usecase.dart';
 import 'bluetooth_event.dart';
 import 'bluetooth_state.dart';
@@ -23,11 +24,14 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
   final BluetoothRepository bluetoothRepository;
   final AppLogger _appLogger = AppLogger();
   final LogsStorageService _logsStorageService = LogsStorageService();
+  final NativeBluetoothConnectionService _nativeConnectionService = NativeBluetoothConnectionService();
 
   StreamSubscription<List<BluetoothDeviceEntity>>? _devicesSubscription;
   StreamSubscription<BluetoothLogEntity>? _logsSubscription;
   StreamSubscription<bool>? _scanningSubscription;
   StreamSubscription<bool>? _bluetoothEnabledSubscription;
+  StreamSubscription<Map<String, dynamic>>? _nativeConnectionSubscription;
+  StreamSubscription<Map<String, dynamic>>? _nativeDisconnectionSubscription;
 
   BluetoothBloc({
     required this.startBluetoothScan,
@@ -46,6 +50,9 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
     on<LoadLogsEvent>(_onLoadLogs);
     on<ToggleShowAllDevicesEvent>(_onToggleShowAllDevices);
     on<AddLogEvent>(_onAddLog);
+    on<ConnectToDeviceNativeEvent>(_onConnectToDeviceNative);
+    on<DisconnectFromDeviceNativeEvent>(_onDisconnectFromDeviceNative);
+    on<CheckConnectionTimeoutEvent>(_onCheckConnectionTimeout);
 
     _initializeStreams();
     _initializeLogger();
@@ -69,10 +76,12 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
       
       // Обновляем состояние только если есть данные для загрузки
       if (savedLogs.isNotEmpty || savedDevices.isNotEmpty) {
-        emit(state.copyWith(
-          logs: savedLogs.isNotEmpty ? savedLogs : state.logs,
-          previouslyConnectedDevices: savedDevices.isNotEmpty ? savedDevices : state.previouslyConnectedDevices,
-        ));
+        if (!isClosed) {
+          emit(state.copyWith(
+            logs: savedLogs.isNotEmpty ? savedLogs : state.logs,
+            previouslyConnectedDevices: savedDevices.isNotEmpty ? savedDevices : state.previouslyConnectedDevices,
+          ));
+        }
         
         if (savedLogs.isNotEmpty) {
           print('BluetoothBloc: Загружено ${savedLogs.length} сохраненных логов');
@@ -148,6 +157,118 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
           }
         },
       );
+      
+      // Слушаем нативные подключения
+      _nativeConnectionSubscription = _nativeConnectionService.connectionStream.listen(
+        (connectionData) {
+          if (!isClosed) {
+            final deviceAddress = connectionData['deviceAddress'] as String?;
+            final deviceName = connectionData['deviceName'] as String? ?? 'Неизвестное устройство';
+            
+            if (deviceAddress != null) {
+              // Обновляем устройство в списке найденных устройств
+              final updatedDevices = state.discoveredDevices.map((d) {
+                if (d.id == deviceAddress) {
+                  return BluetoothDeviceEntity(
+                    id: d.id,
+                    name: d.name,
+                    isConnected: true,
+                    rssi: d.rssi,
+                    serviceUuids: d.serviceUuids,
+                    deviceType: d.deviceType,
+                    isConnectable: d.isConnectable,
+                  );
+                }
+                return d;
+              }).toList();
+              
+              // Если устройства нет в списке, добавляем его
+              if (!updatedDevices.any((d) => d.id == deviceAddress)) {
+                updatedDevices.add(BluetoothDeviceEntity(
+                  id: deviceAddress,
+                  name: deviceName,
+                  isConnected: true,
+                  rssi: 0,
+                  serviceUuids: [],
+                  deviceType: '',
+                  isConnectable: true,
+                ));
+              } else {
+                // Обновляем имя устройства если оно изменилось
+                final deviceIndex = updatedDevices.indexWhere((d) => d.id == deviceAddress);
+                if (deviceIndex != -1 && updatedDevices[deviceIndex].name != deviceName) {
+                  final existingDevice = updatedDevices[deviceIndex];
+                  updatedDevices[deviceIndex] = BluetoothDeviceEntity(
+                    id: existingDevice.id,
+                    name: deviceName,
+                    isConnected: existingDevice.isConnected,
+                    rssi: existingDevice.rssi,
+                    serviceUuids: existingDevice.serviceUuids,
+                    deviceType: existingDevice.deviceType,
+                    isConnectable: existingDevice.isConnectable,
+                  );
+                }
+              }
+              
+              // Убираем устройство из списка подключающихся (теперь оно подключено)
+              final updatedConnectingDevices = Set<String>.from(state.connectingDevices)
+                ..remove(deviceAddress);
+              
+              final updatedConnectedDevices = Set<String>.from(state.connectedDevices)
+                ..add(deviceAddress);
+              final updatedPreviouslyConnectedDevices = Set<String>.from(state.previouslyConnectedDevices)
+                ..add(deviceAddress);
+              
+              emit(state.copyWith(
+                discoveredDevices: updatedDevices,
+                connectingDevices: updatedConnectingDevices,
+                connectedDevices: updatedConnectedDevices,
+                previouslyConnectedDevices: updatedPreviouslyConnectedDevices,
+                successMessage: 'Нативное подключение: $deviceName',
+              ));
+              
+              _logsStorageService.savePreviouslyConnectedDevices(updatedPreviouslyConnectedDevices);
+            }
+          }
+        },
+      );
+      
+      // Слушаем нативные отключения
+      _nativeDisconnectionSubscription = _nativeConnectionService.disconnectionStream.listen(
+        (disconnectionData) {
+          if (!isClosed) {
+            final deviceAddress = disconnectionData['deviceAddress'] as String?;
+            final errorStatus = disconnectionData['errorStatus'] as int?;
+            final errorMessage = disconnectionData['errorMessage'] as String?;
+            
+            if (deviceAddress != null) {
+              // Убираем устройство из списка подключающихся (если оно там было)
+              final updatedConnectingDevices = Set<String>.from(state.connectingDevices)
+                ..remove(deviceAddress);
+              
+              final updatedConnectedDevices = Set<String>.from(state.connectedDevices)
+                ..remove(deviceAddress);
+              
+              // Если есть ошибка статуса, показываем сообщение об ошибке
+              String? message;
+              if (errorStatus != null && errorStatus != 0) {
+                message = errorMessage?.isNotEmpty == true 
+                    ? 'Ошибка подключения: $errorMessage' 
+                    : 'Устройство отключено (статус: $errorStatus)';
+              } else {
+                message = 'Устройство отключено (нативное)';
+              }
+              
+              emit(state.copyWith(
+                connectingDevices: updatedConnectingDevices,
+                connectedDevices: updatedConnectedDevices,
+                errorMessage: errorStatus != null && errorStatus != 0 ? message : null,
+                successMessage: errorStatus == null || errorStatus == 0 ? message : null,
+              ));
+            }
+          }
+        },
+      );
     } catch (e) {
       if (!isClosed) {
         emit(state.copyWith(errorMessage: 'Ошибка инициализации потоков: $e'));
@@ -157,13 +278,13 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
 
   Future<void> _onStartScan(StartScanEvent event, Emitter<BluetoothState> emit) async {
     try {
-      emit(state.copyWith(isLoading: true, errorMessage: null));
+      emit(state.copyWith(isLoading: true, errorMessage: null, showAllDevices: false));
       await _appLogger.logScanning('Запуск сканирования Bluetooth устройств', additionalData: {
         'timestamp': AppLogger.formatTimestamp(DateTime.now()),
         'scanType': 'discovery',
       });
       await startBluetoothScan(NoParams());
-      emit(state.copyWith(isLoading: false, successMessage: 'Сканирование начато'));
+      emit(state.copyWith(isLoading: false, successMessage: 'Сканирование начато', showAllDevices: false));
       await _appLogger.logScanning('Сканирование успешно запущено', additionalData: {
         'status': 'started',
         'timestamp': AppLogger.formatTimestamp(DateTime.now()),
@@ -396,6 +517,136 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
     // Сохраняем логи локально
     _logsStorageService.saveLogs(updatedLogs);
   }
+  
+  Future<void> _onConnectToDeviceNative(ConnectToDeviceNativeEvent event, Emitter<BluetoothState> emit) async {
+    try {
+      final device = state.discoveredDevices.firstWhere(
+        (d) => d.id == event.deviceId,
+        orElse: () => BluetoothDeviceEntity(
+          id: event.deviceId,
+          name: 'Неизвестное устройство',
+          isConnected: false,
+          rssi: 0,
+          serviceUuids: [],
+          deviceType: '',
+        ),
+      );
+      
+      await _appLogger.logConnection(device.name, event.deviceId, isConnected: false, additionalData: {
+        'action': 'attempting_native_connection',
+        'deviceType': device.deviceType,
+        'rssi': device.rssi,
+        'timestamp': AppLogger.formatTimestamp(DateTime.now()),
+      });
+      
+      // Добавляем устройство в список подключающихся
+      final updatedConnectingDevices = Set<String>.from(state.connectingDevices)
+        ..add(event.deviceId);
+      
+      emit(state.copyWith(
+        connectingDevices: updatedConnectingDevices,
+        errorMessage: null,
+      ));
+      
+      // Подключаемся через нативный сервис
+      final success = await _nativeConnectionService.connectToDevice(event.deviceId);
+      
+      if (!success) {
+        // Если подключение не удалось инициировать, сразу убираем из списка подключающихся
+        final finalConnectingDevices = Set<String>.from(state.connectingDevices)
+          ..remove(event.deviceId);
+        
+        await _appLogger.logError('Не удалось подключиться через нативный метод к устройству ${device.name}', 
+            context: 'ConnectToDeviceNative', deviceId: event.deviceId, deviceName: device.name);
+        emit(state.copyWith(
+          connectingDevices: finalConnectingDevices,
+          errorMessage: 'Не удалось инициировать нативное подключение',
+        ));
+      } else {
+        // Подключение инициировано успешно - устройство остается в connectingDevices
+        // и будет удалено из него только когда придет событие onDeviceConnected или onDeviceDisconnected
+        // Добавляем таймаут на случай, если событие не придет
+        final deviceIdForTimeout = event.deviceId;
+        final deviceNameForTimeout = device.name;
+        Future.delayed(const Duration(seconds: 30), () async {
+          if (!isClosed) {
+            // Проверяем, что обработчик события еще активен перед вызовом emit
+            // Используем add для отправки события вместо прямого emit
+            add(CheckConnectionTimeoutEvent(deviceIdForTimeout, deviceNameForTimeout));
+          }
+        });
+        
+        await _appLogger.logConnection(device.name, event.deviceId, isConnected: false, additionalData: {
+          'action': 'native_connection_initiated',
+          'deviceType': device.deviceType,
+          'rssi': device.rssi,
+          'timestamp': AppLogger.formatTimestamp(DateTime.now()),
+        });
+        
+        // Обнаружение сервисов будет вызвано автоматически в Kotlin после успешного подключения
+        emit(state.copyWith(
+          successMessage: 'Нативное подключение инициировано',
+        ));
+      }
+    } catch (e) {
+      await _appLogger.logError('Ошибка нативного подключения: $e', context: 'ConnectToDeviceNative', deviceId: event.deviceId);
+      
+      final finalConnectingDevices = Set<String>.from(state.connectingDevices)
+        ..remove(event.deviceId);
+      
+      emit(state.copyWith(
+        connectingDevices: finalConnectingDevices,
+        errorMessage: 'Ошибка нативного подключения: $e',
+      ));
+    }
+  }
+  
+  Future<void> _onDisconnectFromDeviceNative(DisconnectFromDeviceNativeEvent event, Emitter<BluetoothState> emit) async {
+    try {
+      final success = await _nativeConnectionService.disconnectFromDevice(event.deviceId);
+      
+      if (success) {
+        final updatedConnectedDevices = Set<String>.from(state.connectedDevices)
+          ..remove(event.deviceId);
+        
+        emit(state.copyWith(
+          connectedDevices: updatedConnectedDevices,
+          successMessage: 'Устройство отключено (нативное)',
+        ));
+      } else {
+        emit(state.copyWith(
+          errorMessage: 'Не удалось отключить устройство',
+        ));
+      }
+    } catch (e) {
+      emit(state.copyWith(
+        errorMessage: 'Ошибка отключения: $e',
+      ));
+    }
+  }
+  
+  Future<void> _onCheckConnectionTimeout(CheckConnectionTimeoutEvent event, Emitter<BluetoothState> emit) async {
+    try {
+      // Проверяем, что устройство все еще в connectingDevices и не подключено
+      if (state.connectingDevices.contains(event.deviceId) && 
+          !state.connectedDevices.contains(event.deviceId)) {
+        // Если через 30 секунд устройство все еще в connectingDevices и не подключено, убираем его
+        final timeoutConnectingDevices = Set<String>.from(state.connectingDevices)
+          ..remove(event.deviceId);
+        
+        await _appLogger.logError('Таймаут нативного подключения к устройству ${event.deviceName}', 
+            context: 'ConnectToDeviceNative', deviceId: event.deviceId, deviceName: event.deviceName);
+        
+        emit(state.copyWith(
+          connectingDevices: timeoutConnectingDevices,
+          errorMessage: 'Таймаут нативного подключения к ${event.deviceName}',
+        ));
+      }
+    } catch (e) {
+      // Игнорируем ошибки проверки таймаута
+      print('BluetoothBloc: Ошибка проверки таймаута: $e');
+    }
+  }
 
   @override
   Future<void> close() {
@@ -406,6 +657,9 @@ class BluetoothBloc extends Bloc<BluetoothEvent, BluetoothState> {
     _logsSubscription?.cancel();
     _scanningSubscription?.cancel();
     _bluetoothEnabledSubscription?.cancel();
+    _nativeConnectionSubscription?.cancel();
+    _nativeDisconnectionSubscription?.cancel();
+    _nativeConnectionService.dispose();
     return super.close();
   }
 

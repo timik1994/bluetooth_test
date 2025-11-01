@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import '../../presentation/bloc/bluetooth_bloc.dart';
 import '../../presentation/bloc/bluetooth_event.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
@@ -40,10 +41,13 @@ class EmulationLogger {
       final timestamp = _formatTimestampForFilename(DateTime.now());
       _logFile = File('${logDir.path}/emulation_$timestamp.log');
       
-      await _logFile!.writeAsString('=== ЭМУЛЯЦИЯ BLE УСТРОЙСТВА ===\n');
-      await _logFile!.writeAsString('Время запуска: ${DateTime.now()}\n');
-      await _logFile!.writeAsString('Путь к логам: ${_logFile!.path}\n');
-      await _logFile!.writeAsString('================================\n\n');
+      // Записываем с явным указанием UTF-8 кодировки и BOM для правильного отображения в Windows
+      final header = '=== ЭМУЛЯЦИЯ BLE УСТРОЙСТВА ===\n'
+          'Время запуска: ${DateTime.now()}\n'
+          'Путь к логам: ${_logFile!.path}\n'
+          '================================\n\n';
+      final utf8Bom = [0xEF, 0xBB, 0xBF]; // UTF-8 BOM для правильного отображения в Windows
+      await _logFile!.writeAsBytes([...utf8Bom, ...utf8.encode(header)]);
       
       _isInitialized = true;
       print('EmulationLogger: Логгер инициализирован: ${_logFile!.path}');
@@ -84,7 +88,8 @@ class EmulationLogger {
     try {
       final timestamp = AppLogger.formatTimestamp(DateTime.now());
       final logEntry = '[$timestamp] [$level] $message\n';
-      await _logFile!.writeAsString(logEntry, mode: FileMode.append);
+      // Записываем с явным указанием UTF-8 кодировки
+      await _logFile!.writeAsBytes(utf8.encode(logEntry), mode: FileMode.append);
       print('EmulationLogger: $message');
       
       // Добавляем в систему логов приложения

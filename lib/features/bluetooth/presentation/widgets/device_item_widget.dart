@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import '../../domain/entities/bluetooth_device_entity.dart';
 import 'device_details_modal.dart';
+import 'connection_type_modal.dart';
+import 'treadmill_data_modal.dart';
 
 class DeviceItemWidget extends StatelessWidget {
   final BluetoothDeviceEntity device;
   final VoidCallback? onConnect;
   final VoidCallback? onReconnect;
   final VoidCallback? onDisconnect;
+  final VoidCallback? onConnectNative;
   final bool isConnecting;
   final bool isConnected;
   final bool wasPreviouslyConnected;
@@ -18,6 +21,7 @@ class DeviceItemWidget extends StatelessWidget {
     this.onConnect,
     this.onReconnect,
     this.onDisconnect,
+    this.onConnectNative,
     this.isConnecting = false,
     this.isConnected = false,
     this.wasPreviouslyConnected = false,
@@ -148,12 +152,15 @@ class DeviceItemWidget extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              'RSSI: ${device.rssi} dBm',
-                              style: TextStyle(
-                                color: _getSignalColor(device.rssi),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
+                            Flexible(
+                              child: Text(
+                                'RSSI: ${device.rssi} dBm',
+                                style: TextStyle(
+                                  color: _getSignalColor(device.rssi),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
                           ],
@@ -170,11 +177,14 @@ class DeviceItemWidget extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              '≈ ${_estimateDistanceMeters(device.rssi)}',
-                              style: TextStyle(
-                                color: _distanceColor(device.rssi),
-                                fontSize: 11,
+                            Flexible(
+                              child: Text(
+                                '≈ ${_estimateDistanceMeters(device.rssi)}',
+                                style: TextStyle(
+                                  color: _distanceColor(device.rssi),
+                                  fontSize: 11,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
                           ],
@@ -185,6 +195,29 @@ class DeviceItemWidget extends StatelessWidget {
                 ),
                 
                 const SizedBox(width: 12),
+                
+                // Кнопка открытия модалки с данными (для подключенных устройств)
+                if (isConnected)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: IconButton(
+                      onPressed: () => _openDataModal(context),
+                      icon: Icon(
+                        Icons.analytics,
+                        color: Colors.blue.shade700,
+                        size: 20,
+                      ),
+                      tooltip: 'Данные и сервисы',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.blue.shade50,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                  ),
                 
                 // Кнопка действия
                 _buildActionButton(context),
@@ -314,7 +347,7 @@ class DeviceItemWidget extends StatelessWidget {
 
     return GestureDetector(
       onTap: () {
-        onConnect?.call();
+        _showConnectionTypeModal(context);
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -358,6 +391,35 @@ class DeviceItemWidget extends StatelessWidget {
         onConnect: onConnect,
         onReconnect: onReconnect,
         isConnecting: isConnecting,
+      ),
+    );
+  }
+  
+  void _showConnectionTypeModal(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => ConnectionTypeModal(
+        deviceName: device.name,
+        deviceId: device.id,
+        onConnectionTypeSelected: (connectionType) {
+          if (connectionType == ConnectionType.flutter) {
+            onConnect?.call();
+          } else {
+            // Вызываем callback для нативного подключения
+            onConnectNative?.call();
+          }
+        },
+      ),
+    );
+  }
+  
+  void _openDataModal(BuildContext context) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => TreadmillDataModal(
+        deviceName: device.name,
+        deviceAddress: device.id,
       ),
     );
   }

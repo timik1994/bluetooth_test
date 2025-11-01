@@ -43,6 +43,11 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
   // Карта для дедупликации устройств по MAC-адресу
   final Map<String, BluetoothDeviceEntity> _discoveredDevicesMap = {};
   
+  // Периодическое чтение характеристик
+  final Map<String, List<Map<String, dynamic>>> _characteristicsToReadPeriodically = {}; // {characteristic, serviceUuid}
+  final Map<String, Timer> _periodicReadTimers = {};
+  final Map<String, List<StreamSubscription>> _characteristicSubscriptions = {};
+  
   // Дедупликация логов
   String? _lastLogMessage;
   DateTime? _lastLogTime;
@@ -734,6 +739,8 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
           if (state == BluetoothConnectionState.disconnected) {
             _addLog(LogLevel.warning, '❌ Устройство "$deviceName" отключено');
             _connectedDevices.remove(deviceId);
+            // Очищаем периодическое чтение и подписки при отключении
+            _stopPeriodicReading(deviceId);
           }
         });
         
@@ -879,16 +886,31 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
                       'read_success': true,
                     });
                   
-                  // Попытка декодирования
+                  // Попытка декодирования (UTF-8)
                   try {
-                    final decoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
-                    if (decoded.isNotEmpty) {
-                      _addLog(LogLevel.debug, '🔤 Декодированные данные: "$decoded"', 
-                        additionalData: {
-                          ...charInfo,
-                          'operation': 'decode',
-                          'decoded_string': decoded,
-                        });
+                    String? decoded;
+                    try {
+                      // Пробуем UTF-8 декодирование
+                      decoded = utf8.decode(value);
+                      if (decoded.isNotEmpty && decoded.trim().isNotEmpty) {
+                        _addLog(LogLevel.debug, '🔤 Декодированные данные (UTF-8): "$decoded"', 
+                          additionalData: {
+                            ...charInfo,
+                            'operation': 'decode_utf8',
+                            'decoded_string': decoded,
+                          });
+                      }
+                    } catch (e) {
+                      // Если UTF-8 не удалось, пробуем ASCII
+                      final asciiDecoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
+                      if (asciiDecoded.isNotEmpty) {
+                        _addLog(LogLevel.debug, '🔤 Декодированные данные (ASCII): "$asciiDecoded"', 
+                          additionalData: {
+                            ...charInfo,
+                            'operation': 'decode_ascii',
+                            'decoded_string': asciiDecoded,
+                          });
+                      }
                     }
                   } catch (e) {
                     // Игнорируем ошибки декодирования
@@ -908,10 +930,11 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
             // Небольшая задержка между операциями для избежания конфликтов
             await Future.delayed(const Duration(milliseconds: 100));
             
-            // Подписываемся на уведомления
+            // Подписываемся на уведомления (автоматически для всех характеристик с NOTIFY/INDICATE)
             if (characteristic.properties.notify || characteristic.properties.indicate) {
               try {
-                await _subscribeToNotificationsWithRetry(characteristic, charInfo);
+                final deviceId = device.remoteId.toString();
+                await _subscribeToNotificationsWithRetry(characteristic, charInfo, deviceId, deviceName);
               } catch (e) {
                 _addLog(LogLevel.warning, '⚠️ Ошибка подписки на ${characteristic.uuid}: $e',
                   additionalData: {
@@ -921,6 +944,31 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
                     'subscription_success': false,
                   });
               }
+            }
+            
+            // Сохраняем характеристики с READ для периодического чтения (если они не поддерживают NOTIFY)
+            // Приоритет отдаем важным сервисам для дорожек
+            final hasRead = characteristic.properties.read;
+            final hasNotify = characteristic.properties.notify || characteristic.properties.indicate;
+            final isFitnessMachineService = service.uuid.toString().toLowerCase().contains('1826');
+            final isTreadmillData = characteristic.uuid.toString().toLowerCase().contains('2acd') ||
+                                    characteristic.uuid.toString().toLowerCase().contains('2ad9') ||
+                                    characteristic.uuid.toString().toLowerCase().contains('2ada');
+            
+            if (hasRead && !hasNotify && (isFitnessMachineService || isTreadmillData)) {
+              final deviceId = device.remoteId.toString();
+              if (!_characteristicsToReadPeriodically.containsKey(deviceId)) {
+                _characteristicsToReadPeriodically[deviceId] = [];
+              }
+              _characteristicsToReadPeriodically[deviceId]!.add({
+                'characteristic': characteristic,
+                'serviceUuid': service.uuid.toString(),
+              });
+              _addLog(LogLevel.info, '📋 Добавлена характеристика ${characteristic.uuid} для периодического чтения',
+                additionalData: {
+                  ...charInfo,
+                  'operation': 'add_to_periodic_read',
+                });
             }
           } catch (e) {
             _addLog(LogLevel.warning, '⚠️ Общая ошибка работы с характеристикой ${characteristic.uuid}: $e',
@@ -936,6 +984,21 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
           await Future.delayed(const Duration(milliseconds: 50));
         }
       }
+      
+      // Запускаем периодическое чтение характеристик после завершения обработки всех сервисов
+      final deviceId = device.remoteId.toString();
+      final characteristicsToRead = _characteristicsToReadPeriodically[deviceId];
+      if (characteristicsToRead != null && characteristicsToRead.isNotEmpty) {
+        _startPeriodicReading(device, deviceId, deviceName, characteristicsToRead);
+      }
+      
+      _addLog(LogLevel.info, '✅ Автоматическая подписка и чтение завершены для "$deviceName"',
+        additionalData: {
+          'device_id': deviceId,
+          'device_name': deviceName,
+          'notify_subscriptions': _characteristicSubscriptions[deviceId]?.length ?? 0,
+          'periodic_read_count': characteristicsToRead?.length ?? 0,
+        });
     } catch (e) {
       _addLog(LogLevel.error, '❌ Ошибка сбора данных с "$deviceName": $e',
         additionalData: {
@@ -945,6 +1008,97 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
           'error_type': e.runtimeType.toString(),
         });
     }
+  }
+  
+  /// Запускает периодическое чтение характеристик для устройства
+  void _startPeriodicReading(
+    BluetoothDevice device,
+    String deviceId,
+    String deviceName,
+    List<Map<String, dynamic>> characteristicsData,
+  ) {
+    // Останавливаем предыдущий таймер если есть
+    _stopPeriodicReading(deviceId);
+    
+    if (characteristicsData.isEmpty) return;
+    
+    int currentIndex = 0;
+    
+    _periodicReadTimers[deviceId] = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      // Проверяем, что устройство все еще подключено
+      if (!device.isConnected) {
+        _addLog(LogLevel.warning, '⚠️ Устройство "$deviceName" отключено, останавливаем периодическое чтение');
+        _stopPeriodicReading(deviceId);
+        return;
+      }
+      
+      // Читаем следующую характеристику по кругу
+      if (currentIndex < characteristicsData.length) {
+        final charData = characteristicsData[currentIndex];
+        final characteristic = charData['characteristic'] as BluetoothCharacteristic;
+        final serviceUuid = charData['serviceUuid'] as String;
+        
+        try {
+          final charInfo = {
+            'characteristic_uuid': characteristic.uuid.toString(),
+            'service_uuid': serviceUuid,
+            'operation': 'periodic_read',
+          };
+          
+          final value = await _readCharacteristicWithRetry(characteristic, charInfo);
+          if (value != null) {
+            _addLog(LogLevel.info, '📊 Периодическое чтение "${characteristic.uuid}": ${value.length} байт',
+              additionalData: {
+                ...charInfo,
+                'data_length': value.length,
+                'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
+                'raw_data_decimal': value.join(' '),
+                'raw_data_bytes': value,
+                'read_success': true,
+              });
+            
+            // Логируем через AppLogger
+            await _appLogger.logDataReceived(
+              deviceName,
+              deviceId,
+              {
+                'characteristicUuid': characteristic.uuid.toString(),
+                'serviceUuid': serviceUuid,
+                'hexData': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ').toUpperCase(),
+                'dataSize': value.length,
+                'rawData': value,
+                'type': 'periodic_read',
+              },
+            );
+          }
+        } catch (e) {
+          _addLog(LogLevel.warning, '⚠️ Ошибка периодического чтения ${characteristic.uuid}: $e',
+            additionalData: {
+              'characteristic_uuid': characteristic.uuid.toString(),
+              'service_uuid': serviceUuid,
+              'operation': 'periodic_read',
+              'error': e.toString(),
+            });
+        }
+        
+        currentIndex = (currentIndex + 1) % characteristicsData.length;
+      }
+    });
+    
+    _addLog(LogLevel.info, '🔄 Запущено периодическое чтение для ${characteristicsData.length} характеристик "$deviceName" (каждую секунду)');
+  }
+  
+  /// Останавливает периодическое чтение для устройства
+  void _stopPeriodicReading(String deviceId) {
+    final timer = _periodicReadTimers.remove(deviceId);
+    timer?.cancel();
+    
+    // Очищаем подписки
+    final subscriptions = _characteristicSubscriptions.remove(deviceId);
+    subscriptions?.forEach((sub) => sub.cancel());
+    
+    // Очищаем список характеристик
+    _characteristicsToReadPeriodically.remove(deviceId);
   }
 
   @override
@@ -977,6 +1131,9 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
       // Получаем информацию об устройстве для логов
       final deviceInfo = _discoveredDevicesMap[deviceId];
       final deviceName = deviceInfo?.name ?? 'Неизвестное устройство';
+      
+      // Останавливаем периодическое чтение и очищаем подписки
+      _stopPeriodicReading(deviceId);
       
       final device = BluetoothDevice.fromId(deviceId);
       
@@ -1139,9 +1296,11 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
   }
 
   /// Подписывается на уведомления с повторными попытками при ошибках
-  Future<void> _subscribeToNotificationsWithRetry(
+  Future<StreamSubscription?> _subscribeToNotificationsWithRetry(
     BluetoothCharacteristic characteristic,
-    Map<String, dynamic> charInfo, {
+    Map<String, dynamic> charInfo,
+    String deviceId,
+    String deviceName, {
     int maxRetries = 3,
     Duration initialDelay = const Duration(milliseconds: 500),
   }) async {
@@ -1149,30 +1308,68 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
       try {
         await characteristic.setNotifyValue(true);
         
-        // Настраиваем слушатель уведомлений
-        characteristic.lastValueStream.listen((value) {
-          _addLog(LogLevel.info, '📨 Уведомление от "${characteristic.uuid}": ${value.length} байт',
+        // Настраиваем слушатель уведомлений и сохраняем подписку
+        final subscription = characteristic.lastValueStream.listen((value) async {
+          final hexData = value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+          
+          _addLog(LogLevel.info, '📨 Уведомление от "${characteristic.uuid}": HEX: ${hexData.length > 20 ? '${hexData.substring(0, 20)}...' : hexData} (${value.length} байт)',
             additionalData: {
               ...charInfo,
               'operation': 'notification_received',
               'data_length': value.length,
-              'raw_data_hex': value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' '),
+              'raw_data_hex': hexData,
               'raw_data_decimal': value.join(' '),
               'raw_data_bytes': value,
               'notification_type': characteristic.properties.notify ? 'notify' : 'indicate',
               'timestamp': AppLogger.formatTimestamp(DateTime.now()),
             });
           
-          // Попытка декодирования уведомления
+          // Логируем через AppLogger для отображения в логах приложения
+          final connectedDevice = _connectedDevices[deviceId];
+          if (connectedDevice != null) {
+            // Получаем имя устройства из кэша или используем переданное
+            final deviceNameForLog = _discoveredDevicesMap[deviceId]?.name ?? deviceName;
+            final serviceUuidForLog = charInfo['service_uuid'] as String? ?? 'Неизвестно';
+            
+            await _appLogger.logDataReceived(
+              deviceNameForLog,
+              deviceId,
+              {
+                'characteristicUuid': characteristic.uuid.toString(),
+                'serviceUuid': serviceUuidForLog,
+                'hexData': hexData,
+                'dataSize': value.length,
+                'rawData': value,
+                'type': 'notification',
+              },
+            );
+          }
+          
+          // Попытка декодирования уведомления (UTF-8)
           try {
-            final decoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
-            if (decoded.isNotEmpty) {
-              _addLog(LogLevel.debug, '🔔 Декодированное уведомление: "$decoded"',
-                additionalData: {
-                  ...charInfo,
-                  'operation': 'notification_decode',
-                  'decoded_string': decoded,
-                });
+            String? decoded;
+            try {
+              // Пробуем UTF-8 декодирование
+              decoded = utf8.decode(value);
+              if (decoded.isNotEmpty && decoded.trim().isNotEmpty) {
+                _addLog(LogLevel.debug, '🔔 Декодированное уведомление (UTF-8): "$decoded"',
+                  additionalData: {
+                    ...charInfo,
+                    'operation': 'notification_decode_utf8',
+                    'decoded_string': decoded,
+                  });
+              }
+            } catch (e) {
+              // Если UTF-8 не удалось, пробуем ASCII
+              final asciiDecoded = String.fromCharCodes(value.where((b) => b >= 32 && b <= 126));
+              if (asciiDecoded.isNotEmpty) {
+                _addLog(LogLevel.debug, '🔔 Декодированное уведомление (ASCII): "$asciiDecoded"',
+                  additionalData: {
+                    ...charInfo,
+                    'operation': 'notification_decode_ascii',
+                    'decoded_string': asciiDecoded,
+                  });
+              }
             }
           } catch (e) {
             // Игнорируем ошибки декодирования
@@ -1187,7 +1384,13 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
             'attempt': attempt,
           });
         
-        return; // Успешно подписались
+        // Сохраняем подписку для последующей очистки
+        if (!_characteristicSubscriptions.containsKey(deviceId)) {
+          _characteristicSubscriptions[deviceId] = [];
+        }
+        _characteristicSubscriptions[deviceId]!.add(subscription);
+        
+        return subscription; // Успешно подписались
       } catch (e) {
         final errorString = e.toString();
         
@@ -1241,6 +1444,9 @@ class BluetoothLocalDataSourceImpl implements BluetoothLocalDataSource {
         }
       }
     }
+    
+    // Все попытки не удались
+    return null;
   }
 
   /// Читает имя устройства из Device Information Service через GATT

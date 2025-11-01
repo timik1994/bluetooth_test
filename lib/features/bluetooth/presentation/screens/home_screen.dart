@@ -12,6 +12,7 @@ import 'permissions_screen.dart';
 import 'devices_screen.dart';
 import 'emulation_screen.dart';
 import 'logs_screen.dart';
+import '../../../fitness/presentation/screens/treadmill_hud_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -39,6 +40,24 @@ class _HomeScreenState extends State<HomeScreen> {
         title: 'Bluetooth Тестер',
         isDark: isDark,
         actions: [
+          // Кнопка HUD
+          Builder(
+            builder: (context) {
+              return IconButton(
+                tooltip: 'HUD тренировки (тестовые данные)',
+                icon: const Icon(Icons.speed),
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const TreadmillHudScreen(
+                        useTestData: true,
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
           // Селектор стилей
           const StyleSelector(),
           // Переключатель темы

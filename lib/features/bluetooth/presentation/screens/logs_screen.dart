@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../bloc/bluetooth_bloc.dart';
@@ -267,13 +268,25 @@ class LogsScreen extends StatelessWidget {
           
           // Декодирование UTF-8
           try {
-            final utf8Decoded = String.fromCharCodes(bytes);
-            // Проверяем, что это действительно читаемый текст
-            final hasReadableChars = utf8Decoded.codeUnits.any((c) => 
-              (c >= 32 && c <= 126) || c == 9 || c == 10 || c == 13
-            );
-            if (utf8Decoded.isNotEmpty && hasReadableChars && utf8Decoded.trim().isNotEmpty) {
-              decodedData['$key (UTF-8)'] = utf8Decoded;
+            // Сначала пробуем декодировать как UTF-8
+            String? utf8Decoded;
+            try {
+              utf8Decoded = utf8.decode(bytes);
+              // Проверяем, что декодирование дало осмысленный результат
+              // (не только ASCII, но и другие символы)
+              if (utf8Decoded.isNotEmpty && utf8Decoded.trim().isNotEmpty) {
+                decodedData['$key (UTF-8)'] = utf8Decoded;
+              }
+            } catch (e) {
+              // Если UTF-8 декодирование не удалось, пробуем как простую строку ASCII
+              try {
+                final asciiDecoded = String.fromCharCodes(bytes.where((b) => b >= 32 && b <= 126));
+                if (asciiDecoded.isNotEmpty && asciiDecoded.trim().isNotEmpty) {
+                  decodedData['$key (ASCII)'] = asciiDecoded;
+                }
+              } catch (e2) {
+                // Игнорируем ошибки декодирования
+              }
             }
           } catch (e) {
             // Игнорируем ошибки декодирования

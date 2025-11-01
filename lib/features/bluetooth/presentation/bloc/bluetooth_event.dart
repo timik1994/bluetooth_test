@@ -63,3 +63,31 @@ class AddLogEvent extends BluetoothEvent {
   @override
   List<Object> get props => [logEntity];
 }
+
+class ConnectToDeviceNativeEvent extends BluetoothEvent {
+  final String deviceId;
+  
+  const ConnectToDeviceNativeEvent(this.deviceId);
+  
+  @override
+  List<Object> get props => [deviceId];
+}
+
+class DisconnectFromDeviceNativeEvent extends BluetoothEvent {
+  final String deviceId;
+  
+  const DisconnectFromDeviceNativeEvent(this.deviceId);
+  
+  @override
+  List<Object> get props => [deviceId];
+}
+
+class CheckConnectionTimeoutEvent extends BluetoothEvent {
+  final String deviceId;
+  final String deviceName;
+  
+  const CheckConnectionTimeoutEvent(this.deviceId, this.deviceName);
+  
+  @override
+  List<Object> get props => [deviceId, deviceName];
+}

@@ -3,7 +3,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../bloc/bluetooth_bloc.dart';
 import '../bloc/bluetooth_event.dart';
 import '../bloc/bluetooth_state.dart';
+import '../../domain/entities/bluetooth_device_entity.dart';
 import '../widgets/device_item_widget.dart';
+import '../widgets/treadmill_data_modal.dart';
 import 'intercept_screen.dart';
 
 class DevicesScreen extends StatefulWidget {
@@ -15,6 +17,7 @@ class DevicesScreen extends StatefulWidget {
 
 class _DevicesScreenState extends State<DevicesScreen> {
   bool _fabExpanded = false;
+  Set<String> _openedModals = {}; // Отслеживаем открытые модалки чтобы не открывать повторно
 
   @override
   Widget build(BuildContext context) {
@@ -27,10 +30,50 @@ class _DevicesScreenState extends State<DevicesScreen> {
               _fabExpanded = false;
             });
           }
+          
+          // Автоматически открываем модалку при подключении к устройству
+          for (final deviceId in state.connectedDevices) {
+            if (!_openedModals.contains(deviceId)) {
+              final device = state.discoveredDevices.firstWhere(
+                (d) => d.id == deviceId,
+                orElse: () => BluetoothDeviceEntity(
+                  id: deviceId,
+                  name: 'Неизвестное устройство',
+                  isConnected: true,
+                  rssi: 0,
+                  serviceUuids: [],
+                  deviceType: '',
+                ),
+              );
+              
+              _openedModals.add(deviceId);
+              
+              // Небольшая задержка для стабилизации подключения
+              Future.delayed(const Duration(milliseconds: 500), () {
+                if (mounted && state.connectedDevices.contains(deviceId)) {
+                  _openDeviceDataModal(device.name, deviceId);
+                }
+              });
+            }
+          }
+          
+          // Убираем из отслеживания отключенные устройства
+          _openedModals.removeWhere((deviceId) => !state.connectedDevices.contains(deviceId));
         },
         child: _buildDevicesList(),
       ),
       floatingActionButton: _buildFloatingActionButton(),
+    );
+  }
+  
+  void _openDeviceDataModal(String deviceName, String deviceAddress) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => TreadmillDataModal(
+        deviceName: deviceName,
+        deviceAddress: deviceAddress,
+      ),
     );
   }
 
@@ -272,6 +315,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                     ConnectToDeviceEvent(device.id),
                                   );
                             }
+                          } : null,
+                          onConnectNative: device.isConnectable == true ? () {
+                            context.read<BluetoothBloc>().add(
+                                  ConnectToDeviceNativeEvent(device.id),
+                                );
                           } : null,
                           onReconnect: device.isConnectable == true ? () {
                             context.read<BluetoothBloc>().add(

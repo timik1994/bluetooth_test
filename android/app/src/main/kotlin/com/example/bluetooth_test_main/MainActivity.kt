@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
@@ -14,6 +15,10 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.ParcelUuid
@@ -27,11 +32,20 @@ import java.util.UUID
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "ble_peripheral"
+    private val NATIVE_CONNECTION_CHANNEL = "native_bluetooth_connection"
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
     private var bluetoothGattServer: BluetoothGattServer? = null
     private var advertisingCallback: AdvertiseCallback? = null
     private var methodChannel: MethodChannel? = null
+    private var nativeConnectionChannel: MethodChannel? = null
+    
+    // Для нативного подключения
+    private var bluetoothGattClient: BluetoothGatt? = null
+    private val connectedGattDevices = mutableMapOf<String, BluetoothGatt>()
+    private val characteristicsToRead = mutableMapOf<String, MutableList<BluetoothGattCharacteristic>>() // Для периодического чтения
+    private val readHandlers = mutableMapOf<String, android.os.Handler>() // Для периодического чтения
+    private var scanner: android.bluetooth.le.BluetoothLeScanner? = null
     
     // UUID для BLE сервисов и характеристик
     private val HEART_RATE_SERVICE_UUID = UUID.fromString("0000180D-0000-1000-8000-00805F9B34FB")
@@ -68,7 +82,10 @@ class MainActivity : FlutterActivity() {
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         Log.d("BLE", "MethodChannel initialized: $CHANNEL")
         methodChannel?.setMethodCallHandler { call, result ->
-            Log.d("BLE", "Method call received: ${call.method}")
+            // Логируем только важные методы, не обновления данных
+            if (call.method != "updateHeartRate" && call.method != "updateBatteryLevel") {
+                Log.d("BLE", "Method call received: ${call.method}")
+            }
             when (call.method) {
                 "startAdvertising" -> {
                     startBLEAdvertising(call, result)
@@ -87,6 +104,30 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+        
+        // Инициализируем канал для нативного подключения
+        nativeConnectionChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NATIVE_CONNECTION_CHANNEL)
+        Log.d("BLE", "Native Connection Channel initialized: $NATIVE_CONNECTION_CHANNEL")
+        nativeConnectionChannel?.setMethodCallHandler { call, result ->
+            Log.d("BLE", "Native connection method call received: ${call.method}")
+            when (call.method) {
+                "connectToDevice" -> {
+                    connectToDeviceNative(call, result)
+                }
+                "disconnectFromDevice" -> {
+                    disconnectFromDeviceNative(call, result)
+                }
+                "discoverServices" -> {
+                    discoverServicesNative(call, result)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+        
+        // Инициализируем сканер для нативного подключения
+        scanner = bluetoothAdapter?.bluetoothLeScanner
     }
 
     private fun startBLEAdvertising(call: MethodCall, result: MethodChannel.Result) {
@@ -455,18 +496,26 @@ class MainActivity : FlutterActivity() {
             
             Log.d("BLE", "=== DATA RECEIVED FROM TREADMILL ===")
             Log.d("BLE", "Device: ${device.address} (${device.name ?: "Unknown"})")
-            Log.d("BLE", "Characteristic: ${characteristic.uuid}")
+            Log.d("BLE", "Characteristic UUID: ${characteristic.uuid}")
+            Log.d("BLE", "Service UUID: ${characteristic.service.uuid}")
             Log.d("BLE", "Data size: ${value.size} bytes")
             Log.d("BLE", "Data HEX: ${value.joinToString(" ") { "%02X".format(it) }}")
             Log.d("BLE", "Offset: $offset, PreparedWrite: $preparedWrite, ResponseNeeded: $responseNeeded")
             
-            // Обрабатываем данные от дорожки
+            // Обрабатываем данные от дорожки (принимаем данные на любую характеристику с WRITE свойством)
+            // Не пытаемся преобразовывать бинарные данные в строку - это приводит к "каракулям"
+            val hexString = value.joinToString(" ") { "%02X".format(it) }
             val dataString = try {
-                String(value, Charsets.UTF_8)
+                // Пытаемся декодировать только если все байты в читаемом диапазоне
+                val readableBytes = value.filter { it.toInt() in 32..126 || it.toInt() == 9 || it.toInt() == 10 || it.toInt() == 13 }
+                if (readableBytes.size == value.size && readableBytes.isNotEmpty()) {
+                    String(readableBytes.toByteArray(), Charsets.UTF_8)
+                } else {
+                    "Binary data (${value.size} bytes)"
+                }
             } catch (e: Exception) {
                 "Binary data (${value.size} bytes)"
             }
-            val hexString = value.joinToString(" ") { "%02X".format(it) }
             
             Log.d("BLE", "Data as string: $dataString")
             
@@ -510,6 +559,7 @@ class MainActivity : FlutterActivity() {
                 Log.e("BLE", "MethodChannel is null! Cannot notify Flutter about received data")
             }
             
+            // Отправляем ответ, если требуется
             if (responseNeeded) {
                 bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                 Log.d("BLE", "Response sent to device")
@@ -586,7 +636,7 @@ class MainActivity : FlutterActivity() {
         // Характеристика для данных дорожки (Write + Read)
         val treadmillData = BluetoothGattCharacteristic(
             TREADMILL_DATA_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
         )
         val dataConfigDescriptor = BluetoothGattDescriptor(
@@ -595,6 +645,46 @@ class MainActivity : FlutterActivity() {
         )
         treadmillData.addDescriptor(dataConfigDescriptor)
         customDataService.addCharacteristic(treadmillData)
+        
+        // Fitness Machine Service - стандартный сервис для фитнес-оборудования (включая дорожки)
+        // Это позволяет дорожке отправлять нам данные через стандартный протокол
+        val fitnessMachineService = BluetoothGattService(FITNESS_EQUIPMENT_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        
+        // Fitness Machine Control Point - для получения команд и данных от дорожки
+        val fitnessControlPoint = BluetoothGattCharacteristic(
+            FITNESS_CONTROL_POINT_UUID,
+            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_INDICATE,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        val controlPointConfigDescriptor = BluetoothGattDescriptor(
+            CLIENT_CONFIG_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        fitnessControlPoint.addDescriptor(controlPointConfigDescriptor)
+        fitnessMachineService.addCharacteristic(fitnessControlPoint)
+        
+        // Fitness Machine Feature - для получения информации о возможностях дорожки
+        val fitnessFeature = BluetoothGattCharacteristic(
+            FITNESS_FEATURE_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        fitnessMachineService.addCharacteristic(fitnessFeature)
+        
+        // Treadmill Data Characteristic (стандартный UUID для данных дорожки)
+        // UUID: 00002ACD-0000-1000-8000-00805F9B34FB
+        val treadmillDataCharUuid = UUID.fromString("00002ACD-0000-1000-8000-00805F9B34FB")
+        val treadmillDataChar = BluetoothGattCharacteristic(
+            treadmillDataCharUuid,
+            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        val treadmillDataConfigDescriptor = BluetoothGattDescriptor(
+            CLIENT_CONFIG_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        treadmillDataChar.addDescriptor(treadmillDataConfigDescriptor)
+        fitnessMachineService.addCharacteristic(treadmillDataChar)
         
         // Добавляем сервисы к GATT серверу один за другим
         try {
@@ -609,6 +699,9 @@ class MainActivity : FlutterActivity() {
             
             Log.d("BLE", "Adding Custom Data Service for treadmill...")
             bluetoothGattServer?.addService(customDataService)
+            
+            Log.d("BLE", "Adding Fitness Machine Service (standard for treadmills)...")
+            bluetoothGattServer?.addService(fitnessMachineService)
             
             Log.d("BLE", "All GATT services added successfully")
         } catch (e: Exception) {
@@ -726,5 +819,550 @@ class MainActivity : FlutterActivity() {
         }
         
         return analysis
+    }
+    
+    // ========== НАТИВНОЕ ПОДКЛЮЧЕНИЕ К УСТРОЙСТВУ ==========
+    
+    private fun connectToDeviceNative(call: MethodCall, result: MethodChannel.Result) {
+        val permissions = arrayOf(
+            android.Manifest.permission.BLUETOOTH_CONNECT,
+            android.Manifest.permission.BLUETOOTH_SCAN,
+            android.Manifest.permission.ACCESS_FINE_LOCATION
+        )
+        
+        val missingPermissions = permissions.filter { 
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED 
+        }
+        
+        if (missingPermissions.isNotEmpty()) {
+            Log.e("BLE_NATIVE", "Missing permissions: ${missingPermissions.joinToString()}")
+            result.error("PERMISSIONS_REQUIRED", "Missing permissions: ${missingPermissions.joinToString()}", null)
+            return
+        }
+        
+        if (bluetoothAdapter == null || !bluetoothAdapter!!.isEnabled) {
+            result.error("BLUETOOTH_DISABLED", "Bluetooth is not enabled", null)
+            return
+        }
+        
+        try {
+            val deviceAddress = call.argument<String>("deviceAddress")
+            
+            if (deviceAddress == null) {
+                result.error("INVALID_ARGUMENT", "Device address is required", null)
+                return
+            }
+            
+            Log.d("BLE_NATIVE", "Attempting to connect to device: $deviceAddress")
+            
+            // Получаем устройство по адресу
+            val device = if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                bluetoothAdapter?.getRemoteDevice(deviceAddress)
+            } else {
+                result.error("PERMISSIONS_REQUIRED", "BLUETOOTH_CONNECT permission required", null)
+                return
+            }
+            
+            if (device == null) {
+                result.error("DEVICE_NOT_FOUND", "Device not found", null)
+                return
+            }
+            
+            // Проверяем, не подключены ли уже
+            val existingGatt = connectedGattDevices[deviceAddress]
+            if (existingGatt != null) {
+                Log.d("BLE_NATIVE", "Already connected to device: $deviceAddress")
+                result.success(mapOf(
+                    "success" to true,
+                    "deviceAddress" to deviceAddress,
+                    "deviceName" to (device.name ?: "Unknown Device"),
+                    "message" to "Already connected"
+                ))
+                return
+            }
+            
+            // Подключаемся как GATT клиент
+            val gattCallback = object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                    super.onConnectionStateChange(gatt, status, newState)
+                    Log.d("BLE_NATIVE", "Connection state changed: status=$status, newState=$newState")
+                    
+                    if (newState == BluetoothGatt.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                        Log.d("BLE_NATIVE", "Successfully connected to device: ${gatt.device.address}")
+                        connectedGattDevices[deviceAddress] = gatt
+                        
+                        // Автоматически запускаем обнаружение сервисов после успешного подключения
+                        if (ActivityCompat.checkSelfPermission(this@MainActivity, android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                            val discoveryStarted = gatt.discoverServices()
+                            Log.d("BLE_NATIVE", "Service discovery started: $discoveryStarted")
+                        }
+                        
+                        // Уведомляем Flutter о подключении
+                        runOnUiThread {
+                            try {
+                                nativeConnectionChannel?.invokeMethod("onDeviceConnected", mapOf(
+                                    "deviceAddress" to deviceAddress,
+                                    "deviceName" to (device.name ?: "Unknown Device"),
+                                    "bondState" to device.bondState,
+                                    "timestamp" to System.currentTimeMillis()
+                                ))
+                            } catch (e: Exception) {
+                                Log.e("BLE_NATIVE", "Error notifying Flutter: ${e.message}")
+                            }
+                        }
+                    } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                        Log.d("BLE_NATIVE", "Disconnected from device: ${gatt.device.address}, status=$status")
+                        
+                        // Останавливаем периодическое чтение
+                        stopPeriodicCharacteristicReading(deviceAddress)
+                        
+                        connectedGattDevices.remove(deviceAddress)
+                        characteristicsToRead.remove(deviceAddress)
+                        
+                        // Закрываем GATT подключение
+                        try {
+                            gatt.close()
+                        } catch (e: Exception) {
+                            Log.e("BLE_NATIVE", "Error closing GATT: ${e.message}")
+                        }
+                        
+                        // Уведомляем Flutter об отключении с информацией об ошибке
+                        runOnUiThread {
+                            try {
+                                val errorMessage = when (status) {
+                                    133 -> "GATT_ERROR - Connection failed (status 133)"
+                                    8 -> "GATT_INTERNAL_ERROR"
+                                    19 -> "GATT_INSUFFICIENT_AUTHORIZATION"
+                                    22 -> "GATT_INSUFFICIENT_ENCRYPTION"
+                                    else -> if (status != 0) "Connection error: status=$status" else null
+                                }
+                                
+                                nativeConnectionChannel?.invokeMethod("onDeviceDisconnected", mapOf(
+                                    "deviceAddress" to deviceAddress,
+                                    "errorStatus" to status,
+                                    "errorMessage" to (errorMessage ?: ""),
+                                    "timestamp" to System.currentTimeMillis()
+                                ))
+                            } catch (e: Exception) {
+                                Log.e("BLE_NATIVE", "Error notifying Flutter: ${e.message}")
+                            }
+                        }
+                    }
+                }
+                
+                override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                    super.onServicesDiscovered(gatt, status)
+                    Log.d("BLE_NATIVE", "Services discovered: status=$status")
+                    
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        val servicesInfo = mutableListOf<Map<String, Any>>()
+                        var subscribedCount = 0
+                        
+                        gatt.services.forEach { service ->
+                            val characteristicsInfo = mutableListOf<Map<String, Any>>()
+                            
+                            service.characteristics.forEach { characteristic ->
+                                val hasNotify = (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                                val hasIndicate = (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+                                
+                                characteristicsInfo.add(mapOf(
+                                    "uuid" to characteristic.uuid.toString(),
+                                    "properties" to characteristic.properties,
+                                    "permissions" to characteristic.permissions,
+                                    "hasNotify" to hasNotify,
+                                    "hasIndicate" to hasIndicate
+                                ))
+                                
+                                // Автоматически подписываемся на характеристики с NOTIFY или INDICATE
+                                if ((hasNotify || hasIndicate) && ActivityCompat.checkSelfPermission(
+                                        this@MainActivity,
+                                        android.Manifest.permission.BLUETOOTH_CONNECT
+                                    ) == PackageManager.PERMISSION_GRANTED) {
+                                    try {
+                                        // Включаем уведомления/индикации
+                                        val descriptor = characteristic.getDescriptor(CLIENT_CONFIG_UUID)
+                                        if (descriptor != null) {
+                                            val enableValue = if (hasIndicate) {
+                                                BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                                            } else {
+                                                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                            }
+                                            
+                                            descriptor.value = enableValue
+                                            val writeSuccess = gatt.writeDescriptor(descriptor)
+                                            
+                                            if (writeSuccess) {
+                                                subscribedCount++
+                                                Log.d("BLE_NATIVE", "Subscribed to ${characteristic.uuid} (${if (hasIndicate) "INDICATE" else "NOTIFY"})")
+                                            } else {
+                                                Log.w("BLE_NATIVE", "Failed to subscribe to ${characteristic.uuid}")
+                                            }
+                                        } else {
+                                            Log.w("BLE_NATIVE", "No descriptor found for ${characteristic.uuid}")
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("BLE_NATIVE", "Error subscribing to ${characteristic.uuid}: ${e.message}")
+                                    }
+                                }
+                                
+                                // Также сохраняем характеристики с READ свойством для периодического чтения
+                                val hasRead = (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_READ) != 0
+                                val isFitnessMachineService = service.uuid.toString().contains("1826", ignoreCase = true)
+                                val isTreadmillData = characteristic.uuid.toString().contains("2ACD", ignoreCase = true) ||
+                                                      characteristic.uuid.toString().contains("2AD9", ignoreCase = true) ||
+                                                      characteristic.uuid.toString().contains("2ADA", ignoreCase = true)
+                                
+                                // Сохраняем важные характеристики для дорожек для периодического чтения (если они не поддерживают NOTIFY)
+                                if (hasRead && !hasNotify && !hasIndicate && (isFitnessMachineService || isTreadmillData)) {
+                                    if (!characteristicsToRead.containsKey(deviceAddress)) {
+                                        characteristicsToRead[deviceAddress] = mutableListOf()
+                                    }
+                                    characteristicsToRead[deviceAddress]?.add(characteristic)
+                                    Log.d("BLE_NATIVE", "Added ${characteristic.uuid} to periodic read list")
+                                }
+                            }
+                            
+                            servicesInfo.add(mapOf(
+                                "uuid" to service.uuid.toString(),
+                                "type" to service.type,
+                                "characteristics" to characteristicsInfo
+                            ))
+                        }
+                        
+                        Log.d("BLE_NATIVE", "Subscribed to $subscribedCount characteristics with NOTIFY/INDICATE")
+                        
+                        // Запускаем периодическое чтение характеристик, которые не поддерживают NOTIFY
+                        val characteristicsForReading = characteristicsToRead[deviceAddress]
+                        if (characteristicsForReading != null && characteristicsForReading.isNotEmpty()) {
+                            Log.d("BLE_NATIVE", "Starting periodic read for ${characteristicsForReading.size} characteristics")
+                            startPeriodicCharacteristicReading(gatt, deviceAddress, characteristicsForReading)
+                        }
+                        
+                        runOnUiThread {
+                            try {
+                                nativeConnectionChannel?.invokeMethod("onServicesDiscovered", mapOf(
+                                    "deviceAddress" to deviceAddress,
+                                    "services" to servicesInfo,
+                                    "subscribedCount" to subscribedCount,
+                                    "readCharacteristicsCount" to (characteristicsForReading?.size ?: 0),
+                                    "timestamp" to System.currentTimeMillis()
+                                ))
+                            } catch (e: Exception) {
+                                Log.e("BLE_NATIVE", "Error notifying Flutter: ${e.message}")
+                            }
+                        }
+                    }
+                }
+                
+                override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                    super.onDescriptorWrite(gatt, descriptor, status)
+                    Log.d("BLE_NATIVE", "Descriptor write: ${descriptor.uuid}, status=$status")
+                    
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        val characteristic = descriptor.characteristic
+                        val isEnabled = descriptor.value?.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == true ||
+                                      descriptor.value?.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) == true
+                        
+                        Log.d("BLE_NATIVE", "Notifications ${if (isEnabled) "enabled" else "disabled"} for ${characteristic.uuid}")
+                    }
+                }
+                
+                override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                    super.onCharacteristicWrite(gatt, characteristic, status)
+                    Log.d("BLE_NATIVE", "Characteristic write: ${characteristic.uuid}, status=$status")
+                }
+                
+                override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                    super.onCharacteristicRead(gatt, characteristic, status)
+                    Log.d("BLE_NATIVE", "Characteristic read: ${characteristic.uuid}, status=$status")
+                    
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        val data = characteristic.value ?: byteArrayOf()
+                        val hexString = data.joinToString(" ") { "%02X".format(it) }
+                        val dataString = try {
+                            // Пытаемся декодировать только если все байты в читаемом диапазоне
+                            val readableBytes = data.filter { it.toInt() in 32..126 || it.toInt() == 9 || it.toInt() == 10 || it.toInt() == 13 }
+                            if (readableBytes.size == data.size && readableBytes.isNotEmpty()) {
+                                String(readableBytes.toByteArray(), Charsets.UTF_8)
+                            } else {
+                                "Binary data (${data.size} bytes)"
+                            }
+                        } catch (e: Exception) {
+                            "Binary data (${data.size} bytes)"
+                        }
+                        
+                        // Анализируем данные
+                        val dataAnalysis = analyzeReceivedData(data, characteristic.uuid.toString())
+                        
+                        runOnUiThread {
+                            try {
+                                // Отправляем данные в Flutter в том же формате, что и через NOTIFY
+                                nativeConnectionChannel?.invokeMethod("onCharacteristicRead", mapOf(
+                                    "deviceAddress" to deviceAddress,
+                                    "deviceName" to (gatt.device.name ?: "Unknown Device"),
+                                    "characteristicUuid" to characteristic.uuid.toString(),
+                                    "serviceUuid" to characteristic.service.uuid.toString(),
+                                    "hexData" to hexString,
+                                    "rawData" to data.map { it.toInt() },
+                                    "data" to dataString,
+                                    "dataSize" to data.size,
+                                    "analysis" to dataAnalysis,
+                                    "timestamp" to System.currentTimeMillis()
+                                ))
+                                
+                                // Также отправляем через основной канал для совместимости
+                                methodChannel?.invokeMethod("onDataReceived", mapOf(
+                                    "deviceAddress" to deviceAddress,
+                                    "deviceName" to (gatt.device.name ?: "Unknown Device"),
+                                    "characteristicUuid" to characteristic.uuid.toString(),
+                                    "serviceUuid" to characteristic.service.uuid.toString(),
+                                    "hexData" to hexString,
+                                    "rawData" to data.map { it.toInt() },
+                                    "data" to dataString,
+                                    "dataSize" to data.size,
+                                    "analysis" to dataAnalysis,
+                                    "timestamp" to System.currentTimeMillis()
+                                ))
+                                
+                                Log.d("BLE_NATIVE", "Flutter notified about received data via READ")
+                            } catch (e: Exception) {
+                                Log.e("BLE_NATIVE", "Error notifying Flutter: ${e.message}")
+                            }
+                        }
+                    }
+                }
+                
+                override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+                    super.onCharacteristicChanged(gatt, characteristic)
+                    Log.d("BLE_NATIVE", "=== DATA RECEIVED VIA NOTIFY/INDICATE ===")
+                    Log.d("BLE_NATIVE", "Device: ${gatt.device.address} (${gatt.device.name ?: "Unknown"})")
+                    Log.d("BLE_NATIVE", "Characteristic UUID: ${characteristic.uuid}")
+                    Log.d("BLE_NATIVE", "Service UUID: ${characteristic.service.uuid}")
+                    
+                    val data = characteristic.value ?: byteArrayOf()
+                    Log.d("BLE_NATIVE", "Data size: ${data.size} bytes")
+                    val hexString = data.joinToString(" ") { "%02X".format(it) }
+                    Log.d("BLE_NATIVE", "Data HEX: $hexString")
+                    
+                    val dataString = try {
+                        // Пытаемся декодировать только если все байты в читаемом диапазоне
+                        val readableBytes = data.filter { it.toInt() in 32..126 || it.toInt() == 9 || it.toInt() == 10 || it.toInt() == 13 }
+                        if (readableBytes.size == data.size && readableBytes.isNotEmpty()) {
+                            String(readableBytes.toByteArray(), Charsets.UTF_8)
+                        } else {
+                            "Binary data (${data.size} bytes)"
+                        }
+                    } catch (e: Exception) {
+                        "Binary data (${data.size} bytes)"
+                    }
+                    
+                    // Анализируем данные
+                    val dataAnalysis = analyzeReceivedData(data, characteristic.uuid.toString())
+                    
+                    runOnUiThread {
+                        try {
+                            // Отправляем данные в Flutter через оба канала для совместимости
+                            nativeConnectionChannel?.invokeMethod("onCharacteristicChanged", mapOf(
+                                "deviceAddress" to deviceAddress,
+                                "deviceName" to (gatt.device.name ?: "Unknown Device"),
+                                "characteristicUuid" to characteristic.uuid.toString(),
+                                "serviceUuid" to characteristic.service.uuid.toString(),
+                                "hexData" to hexString,
+                                "rawData" to data.map { it.toInt() },
+                                "data" to dataString,
+                                "dataSize" to data.size,
+                                "analysis" to dataAnalysis,
+                                "timestamp" to System.currentTimeMillis()
+                            ))
+                            
+                            // Также отправляем через основной канал для совместимости с существующим кодом
+                            methodChannel?.invokeMethod("onDataReceived", mapOf(
+                                "deviceAddress" to deviceAddress,
+                                "deviceName" to (gatt.device.name ?: "Unknown Device"),
+                                "characteristicUuid" to characteristic.uuid.toString(),
+                                "serviceUuid" to characteristic.service.uuid.toString(),
+                                "hexData" to hexString,
+                                "rawData" to data.map { it.toInt() },
+                                "data" to dataString,
+                                "dataSize" to data.size,
+                                "analysis" to dataAnalysis,
+                                "timestamp" to System.currentTimeMillis()
+                            ))
+                            
+                            Log.d("BLE_NATIVE", "Flutter notified about received data via NOTIFY/INDICATE")
+                        } catch (e: Exception) {
+                            Log.e("BLE_NATIVE", "Error notifying Flutter: ${e.message}")
+                        }
+                    }
+                }
+            }
+            
+            // Подключаемся
+            bluetoothGattClient = if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                device.connectGatt(this, false, gattCallback)
+            } else {
+                result.error("PERMISSIONS_REQUIRED", "BLUETOOTH_CONNECT permission required", null)
+                return
+            }
+            
+            if (bluetoothGattClient == null) {
+                result.error("CONNECTION_FAILED", "Failed to initiate connection", null)
+                return
+            }
+            
+            Log.d("BLE_NATIVE", "Connection initiated, waiting for callback...")
+            result.success(mapOf(
+                "success" to true,
+                "deviceAddress" to deviceAddress,
+                "deviceName" to (device.name ?: "Unknown Device"),
+                "message" to "Connection initiated"
+            ))
+            
+        } catch (e: Exception) {
+            Log.e("BLE_NATIVE", "Error connecting to device: ${e.message}")
+            result.error("CONNECTION_ERROR", e.message, null)
+        }
+    }
+    
+    private fun disconnectFromDeviceNative(call: MethodCall, result: MethodChannel.Result) {
+        val permissions = arrayOf(
+            android.Manifest.permission.BLUETOOTH_CONNECT
+        )
+        
+        val missingPermissions = permissions.filter { 
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED 
+        }
+        
+        if (missingPermissions.isNotEmpty()) {
+            result.error("PERMISSIONS_REQUIRED", "Missing permissions: ${missingPermissions.joinToString()}", null)
+            return
+        }
+        
+        try {
+            val deviceAddress = call.argument<String>("deviceAddress")
+            
+            if (deviceAddress == null) {
+                result.error("INVALID_ARGUMENT", "Device address is required", null)
+                return
+            }
+            
+            val gatt = connectedGattDevices[deviceAddress]
+            if (gatt != null) {
+                // Останавливаем периодическое чтение
+                stopPeriodicCharacteristicReading(deviceAddress)
+                
+                if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                    gatt.disconnect()
+                    gatt.close()
+                }
+                connectedGattDevices.remove(deviceAddress)
+                characteristicsToRead.remove(deviceAddress)
+                Log.d("BLE_NATIVE", "Disconnected from device: $deviceAddress")
+                result.success(mapOf("success" to true))
+            } else {
+                result.success(mapOf("success" to false, "message" to "Device not connected"))
+            }
+        } catch (e: Exception) {
+            Log.e("BLE_NATIVE", "Error disconnecting: ${e.message}")
+            result.error("DISCONNECT_ERROR", e.message, null)
+        }
+    }
+    
+    private fun discoverServicesNative(call: MethodCall, result: MethodChannel.Result) {
+        val permissions = arrayOf(
+            android.Manifest.permission.BLUETOOTH_CONNECT
+        )
+        
+        val missingPermissions = permissions.filter { 
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED 
+        }
+        
+        if (missingPermissions.isNotEmpty()) {
+            result.error("PERMISSIONS_REQUIRED", "Missing permissions: ${missingPermissions.joinToString()}", null)
+            return
+        }
+        
+        try {
+            val deviceAddress = call.argument<String>("deviceAddress")
+            
+            if (deviceAddress == null) {
+                result.error("INVALID_ARGUMENT", "Device address is required", null)
+                return
+            }
+            
+            val gatt = connectedGattDevices[deviceAddress]
+            if (gatt != null) {
+                if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                    val success = gatt.discoverServices()
+                    if (success) {
+                        Log.d("BLE_NATIVE", "Service discovery started for: $deviceAddress")
+                        result.success(mapOf("success" to true))
+                    } else {
+                        result.error("SERVICE_DISCOVERY_FAILED", "Failed to start service discovery", null)
+                    }
+                } else {
+                    result.error("PERMISSIONS_REQUIRED", "BLUETOOTH_CONNECT permission required", null)
+                }
+            } else {
+                result.error("DEVICE_NOT_CONNECTED", "Device is not connected", null)
+            }
+        } catch (e: Exception) {
+            Log.e("BLE_NATIVE", "Error discovering services: ${e.message}")
+            result.error("SERVICE_DISCOVERY_ERROR", e.message, null)
+        }
+    }
+    
+    // Периодическое чтение характеристик для получения данных от дорожки
+    private fun startPeriodicCharacteristicReading(gatt: BluetoothGatt, deviceAddress: String, characteristics: List<BluetoothGattCharacteristic>) {
+        if (characteristics.isEmpty()) return
+        
+        // Останавливаем предыдущий handler если есть
+        stopPeriodicCharacteristicReading(deviceAddress)
+        
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        readHandlers[deviceAddress] = handler
+        
+        var currentIndex = 0
+        val readRunnable = object : Runnable {
+            override fun run() {
+                val gattConnection = connectedGattDevices[deviceAddress]
+                if (gattConnection == null || gattConnection != gatt) {
+                    // Устройство отключено, останавливаем чтение
+                    stopPeriodicCharacteristicReading(deviceAddress)
+                    return
+                }
+                
+                if (currentIndex < characteristics.size) {
+                    val characteristic = characteristics[currentIndex]
+                    if (ActivityCompat.checkSelfPermission(
+                            this@MainActivity,
+                            android.Manifest.permission.BLUETOOTH_CONNECT
+                        ) == PackageManager.PERMISSION_GRANTED) {
+                        try {
+                            val readSuccess = gatt.readCharacteristic(characteristic)
+                            if (readSuccess) {
+                                Log.d("BLE_NATIVE", "Periodic read: ${characteristic.uuid}")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("BLE_NATIVE", "Error in periodic read: ${e.message}")
+                        }
+                    }
+                    currentIndex = (currentIndex + 1) % characteristics.size
+                }
+                
+                // Читаем каждую секунду
+                handler.postDelayed(this, 1000)
+            }
+        }
+        
+        // Запускаем с небольшой задержкой
+        handler.postDelayed(readRunnable, 500)
+        Log.d("BLE_NATIVE", "Started periodic reading for ${characteristics.size} characteristics")
+    }
+    
+    private fun stopPeriodicCharacteristicReading(deviceAddress: String) {
+        val handler = readHandlers.remove(deviceAddress)
+        handler?.removeCallbacksAndMessages(null)
+        Log.d("BLE_NATIVE", "Stopped periodic reading for device: $deviceAddress")
     }
 }

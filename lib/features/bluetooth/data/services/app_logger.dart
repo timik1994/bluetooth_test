@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import '../../presentation/bloc/bluetooth_bloc.dart';
 import '../../presentation/bloc/bluetooth_event.dart';
 import '../../domain/entities/bluetooth_log_entity.dart';
@@ -40,10 +41,13 @@ class AppLogger {
       final timestamp = _formatTimestampForFilename(DateTime.now());
       _logFile = File('${logDir.path}/bluetooth_app_$timestamp.log');
       
-      await _logFile!.writeAsString('=== ЛОГИ BLUETOOTH ПРИЛОЖЕНИЯ ===\n');
-      await _logFile!.writeAsString('Время запуска: ${DateTime.now()}\n');
-      await _logFile!.writeAsString('Путь к логам: ${_logFile!.path}\n');
-      await _logFile!.writeAsString('=====================================\n\n');
+      // Записываем с явным указанием UTF-8 кодировки и BOM для правильного отображения в Windows
+      final header = '=== ЛОГИ BLUETOOTH ПРИЛОЖЕНИЯ ===\n'
+          'Время запуска: ${DateTime.now()}\n'
+          'Путь к логам: ${_logFile!.path}\n'
+          '=====================================\n\n';
+      final utf8Bom = [0xEF, 0xBB, 0xBF]; // UTF-8 BOM для правильного отображения в Windows
+      await _logFile!.writeAsBytes([...utf8Bom, ...utf8.encode(header)]);
       
       _isInitialized = true;
       print('AppLogger: Логгер инициализирован: ${_logFile!.path}');
@@ -195,7 +199,8 @@ class AppLogger {
       
       buffer.writeln(); // Пустая строка для разделения
       
-      await _logFile!.writeAsString(buffer.toString(), mode: FileMode.append);
+      // Записываем с явным указанием UTF-8 кодировки
+      await _logFile!.writeAsBytes(utf8.encode(buffer.toString()), mode: FileMode.append);
       
       // Помечаем лог как записанный
       _loggedIds.add(logEntity.id);
@@ -297,7 +302,11 @@ class AppLogger {
     final characteristicUuid = data['characteristicUuid'] as String? ?? 'Неизвестно';
     final serviceUuid = data['serviceUuid'] as String? ?? 'Неизвестно';
     
-    await log('📊 ДАННЫЕ: От $deviceName - ${hexData.length > 20 ? '${hexData.substring(0, 20)}...' : hexData} ($dataSize байт)', 
+    // Формируем читаемое сообщение с HEX данными вместо некорректной строки
+    final hexPreview = hexData.length > 30 ? '${hexData.substring(0, 30)}...' : hexData;
+    final message = '📊 ДАННЫЕ: От $deviceName - HEX: $hexPreview ($dataSize байт)';
+    
+    await log(message, 
         level: 'INFO', 
         deviceId: deviceAddress, 
         deviceName: deviceName, 
@@ -325,11 +334,26 @@ class AppLogger {
       analysis['decimal'] = rawData.join(' ');
       analysis['binary'] = rawData.map((b) => b.toRadixString(2).padLeft(8, '0')).join(' ');
       
-      // Попытка декодирования как строка
+      // Попытка декодирования как строка (UTF-8)
       try {
-        final stringValue = String.fromCharCodes(rawData);
-        if (RegExp(r'^[\x20-\x7E\x0A\x0D\x09]*$').hasMatch(stringValue) && stringValue.trim().isNotEmpty) {
-          analysis['utf8'] = stringValue;
+        // Сначала пробуем декодировать как UTF-8
+        String? utf8Decoded;
+        try {
+          utf8Decoded = utf8.decode(rawData);
+          // Проверяем, что результат осмысленный
+          if (utf8Decoded.isNotEmpty && utf8Decoded.trim().isNotEmpty) {
+            analysis['utf8'] = utf8Decoded;
+          }
+        } catch (e) {
+          // Если UTF-8 декодирование не удалось, пробуем как ASCII
+          try {
+            final asciiDecoded = String.fromCharCodes(rawData.where((b) => b >= 32 && b <= 126));
+            if (RegExp(r'^[\x20-\x7E\x0A\x0D\x09]*$').hasMatch(asciiDecoded) && asciiDecoded.trim().isNotEmpty) {
+              analysis['ascii'] = asciiDecoded;
+            }
+          } catch (e2) {
+            // Игнорируем ошибки декодирования
+          }
         }
       } catch (e) {
         analysis['utf8'] = 'Ошибка декодирования UTF-8';

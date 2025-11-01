@@ -425,21 +425,40 @@ class _InterceptPageState extends State<InterceptPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'UTF-8 (попытка декодирования):',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.orange.shade700,
-                ),
+              Row(
+                children: [
+                  Icon(Icons.text_fields, size: 16, color: Colors.orange.shade700),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Нормальный вид (UTF-8 декодирование):',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.orange.shade700,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 8),
               SelectableText(
                 _tryDecodeBytes(bytes),
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 13,
                   fontFamily: 'monospace',
-                  color: Colors.orange.shade800,
+                  color: Colors.orange.shade900,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '💡 Подсказка: HEX и DEC - это разные представления одних и тех же байтов.\n'
+                'HEX (шестнадцатеричный) - компактный формат для программистов.\n'
+                'DEC (десятичный) - обычные числа от 0 до 255.\n'
+                'Нормальный вид - это текст, который получается при декодировании этих байтов.',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.orange.shade700,
+                  fontStyle: FontStyle.italic,
                 ),
               ),
             ],
@@ -461,16 +480,67 @@ class _InterceptPageState extends State<InterceptPage> {
   }
 
   String _tryDecodeBytes(List<int> bytes) {
+    if (bytes.isEmpty) return 'Нет данных';
+    
+    // Попытка 1: UTF-8 декодирование
     try {
-      final decoded = String.fromCharCodes(bytes);
-      // Проверяем, содержит ли строка только печатные символы
-      if (RegExp(r'^[\x20-\x7E]*$').hasMatch(decoded)) {
-        return decoded;
-      } else {
-        return 'Содержит непечатные символы';
+      final utf8Decoded = String.fromCharCodes(bytes);
+      // Проверяем, содержит ли строка читаемые символы (ASCII + некоторые Unicode)
+      final hasReadableChars = utf8Decoded.codeUnits.any((c) => 
+        (c >= 32 && c <= 126) || // ASCII печатные символы
+        c == 9 || c == 10 || c == 13 || // табуляция, новая строка, возврат каретки
+        (c >= 160 && c <= 255) // расширенная латиница
+      );
+      
+      if (utf8Decoded.isNotEmpty && hasReadableChars && utf8Decoded.trim().isNotEmpty) {
+        // Фильтруем только читаемые символы для отображения
+        final readable = utf8Decoded.codeUnits
+            .where((c) => (c >= 32 && c <= 126) || c == 9 || c == 10 || c == 13 || (c >= 160 && c <= 255))
+            .map((c) => String.fromCharCode(c))
+            .join();
+        
+        if (readable.isNotEmpty) {
+          return readable;
+        }
       }
     } catch (e) {
-      return 'Ошибка декодирования: $e';
+      // Продолжаем попытки
+    }
+    
+    // Попытка 2: Только ASCII символы
+    try {
+      final asciiOnly = bytes
+          .where((b) => b >= 32 && b <= 126) // Только ASCII печатные символы
+          .map((b) => String.fromCharCode(b))
+          .join();
+      
+      if (asciiOnly.isNotEmpty) {
+        return asciiOnly;
+      }
+    } catch (e) {
+      // Продолжаем
+    }
+    
+    // Попытка 3: UTF-8 с фильтрацией проблемных байтов
+    try {
+      final filteredBytes = bytes.where((b) => b >= 32 && b <= 255).toList();
+      if (filteredBytes.isNotEmpty) {
+        final utf8Decoded = String.fromCharCodes(filteredBytes);
+        
+        if (utf8Decoded.isNotEmpty && utf8Decoded.trim().isNotEmpty) {
+          return utf8Decoded;
+        }
+      }
+    } catch (e) {
+      // Игнорируем
+    }
+    
+    // Если ничего не получилось - показываем информацию о данных
+    final printableCount = bytes.where((b) => b >= 32 && b <= 126).length;
+    if (printableCount == 0) {
+      return 'Только бинарные данные (${bytes.length} байт)';
+    } else {
+      return 'Частично декодируемо (${printableCount}/${bytes.length} читаемых символов)';
     }
   }
 
